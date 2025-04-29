@@ -21,9 +21,11 @@ module testbench_fma16;
   // at start of test, load vectors and pulse reset
   initial
     begin
-      $readmemh("tests/fmul_0.tv", testvectors);
+      $readmemh("work/babytorture.tv", testvectors);
       vectornum = 0; errors = 0;
       reset = 1; #22; reset = 0;
+      $dumpfile("fma16.vcd") ;
+      $dumpvars(0, testbench_fma16) ; 
     end
 
   // apply test vectors on rising edge of clk
