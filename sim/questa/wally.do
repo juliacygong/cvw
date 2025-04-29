@@ -96,9 +96,15 @@ while {$argc > 0} {
 
 echo "lst = $lst"
 
-# if +acc found set flag and remove from list
+# if --gui found set flag and remove from list
 if {[lcheck lst "--gui"]} {
     set GUI 1
+    set accFlag "+acc"
+}
+
+# if --vcd found set flag and remove from list
+if {[lcheck lst "--vcd"]} {
+    set VCD 1
     set accFlag "+acc"
 }
 
@@ -189,7 +195,8 @@ vlog -permissive -lint -work ${WKDIR} {*}${INC_DIRS} {*}${DefineArgs} {*}${locks
 # remove +acc flag for faster sim during regressions if there is no need to access internal signals
 vopt $accFlag ${WKDIR}.${TESTBENCH} ${brekervopt} -work ${WKDIR} {*}${ExpandedParamArgs} -o testbenchopt ${CoverageVoptArg}
 
-vsim -lib ${WKDIR} testbenchopt +TEST=${TESTSUITE} {*}${PlusArgs} -fatal 7 {*}${SVLib} -suppress 3829 ${CoverageVsimArg}
+vsim -lib ${WKDIR} testbenchopt +TEST=${TESTSUITE} {*}${PlusArgs} -fatal 7 {*}${SVLib} -suppress 3829 ${CoverageVsimArg} 
+# +IDV_TRACE2LOG=1  (add this to vsim command to enable ImperasDV RVVI trace logging)
 
 # power add generates the logging necessary for saif generation.
 # power add -r /dut/core/*
