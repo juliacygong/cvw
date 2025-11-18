@@ -44,11 +44,12 @@ module trap import cvw::*;  #(parameter cvw_t P) (
   output logic                 InterruptM,                                      // Interrupt is occurring
   output logic                 ExceptionM,                                      // exception is occurring
   output logic                 IntPendingM,                                     // Interrupt is pending, might occur if enabled
-  output logic                 DelegateM,                                       // Delegate trap to supervisor handler
+  output logic [1:0]           DelegateM,                                       // [00]: trap not delegated (goes to M-mode); [01]: trap delegated to S/HS-mode; [11]: trap further delegated to VS-mode
   output logic [3:0]           CauseM                                           // trap cause
+  output logic                 TrapToM, TrapToHS, TrapToVS
 );
 
-  logic                        MIntGlobalEnM, SIntGlobalEnM;                    // Global interrupt enables
+  logic                        MIntGlobalEnM, SIntGlobalEnM;                    // Global interupt enables
   logic                        Committed;                                       // LSU or IFU has committed to a bus operation that can't be interrupted
   logic                        BothInstrAccessFaultM, BothInstrPageFaultM;      // instruction or HPTW ITLB fill caused an Instruction Access Fault
   logic [11:0]                 PendingIntsM, ValidIntsM, EnabledIntsM;          // interrupts are pending, valid, or enabled
@@ -69,8 +70,15 @@ module trap import cvw::*;  #(parameter cvw_t P) (
   assign ValidIntsM    = Committed ? '0 : EnabledIntsM;
   assign InterruptM    = (|ValidIntsM) & InstrValidM & (~wfiM | wfiW); // suppress interrupt if the memory system has partially processed a request. Delay interrupt until wfi is in the W stage.
   // wfiW is to support possible but unlikely back to back wfi instructions. wfiM would be high in the M stage, while also in the W stage.
-  assign DelegateM     = P.S_SUPPORTED & (InterruptM ? MIDELEG_REGW[CauseM] : MEDELEG_REGW[CauseM]) &
-                     (PrivilegeModeW == P.U_MODE | PrivilegeModeW == P.S_MODE);
+  // delegate
+  assign DelegateM[0]  = P.S_SUPPORTED & (InterruptM ? MIDELEG_REGW[CauseM] : MEDELEG_REGW[CauseM]) &
+                         (PrivilegeModeW == P.U_MODE | PrivilegeModeW == P.S_MODE);
+  // Delegate to VS mode if the mode exists and HIDELEG/HEDELEG says to do so and the virt bit is already 1
+  assign DelegateM[1]  = P.H_SUPPORTED & DelegateM[0] & (InterruptM ? HIDELEG_REGW[CauseM] : HEDELEG_REGW[CauseM]) & VirtModeW;
+
+  assign TrapToVS = 1'b0; // until hedeleg/hideleg are implemented
+  assign TrapToHS = DelegateM;
+  assign TrapToM  = TrapM & ~TrapToHS; // and not VS
 
   ///////////////////////////////////////////
   // Trigger Traps
