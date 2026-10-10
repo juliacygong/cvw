@@ -72,7 +72,8 @@ def run_coremark(config, xlen):
     _, info = sh(f"file {elf}") if elf.exists() else (0, "")
     if f"ELF {xlen}-bit" not in info:
         print(f"  rebuilding CoreMark for RV{xlen} (work/ currently holds a different width)")
-        rc, out = sh(f"make -C {WALLY}/benchmarks/coremark XLEN={xlen}")
+        # -B: the targets do not depend on XLEN, so make would otherwise call the old width up to date
+        rc, out = sh(f"make -B -C {WALLY}/benchmarks/coremark XLEN={xlen}")
         if rc:
             raise RuntimeError(f"CoreMark build failed:\n{out[-2000:]}")
 
