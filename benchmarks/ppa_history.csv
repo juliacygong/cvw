@@ -15,3 +15,4 @@ date,githash,branch,dirty,note,config,xlen,tech,freq_mhz,maxopt,coremark_ticks,m
 2026-10-06 01:25,e1a2e553d,superscalar_wally_decode,yes,"C3: memory in either slot, loads and stores",rv32gc,32,sky130,10000,0,2234122,2609304,4.47,2875254,893846,45.11,2757550,,,,,,
 2026-10-06 02:18,e1a2e553d,superscalar_wally_decode,yes,Zb/Zk/Zicond in slot 1 via replay-on-illegal,rv32gc,32,sky130,10000,0,2231686,2609304,4.48,2875293,896423,45.3,2755068,,,,,,
 2026-10-06 03:28,e1a2e553d,superscalar_wally_decode,yes,Zb in slot 1; stores back to slot 0 pending LSU cancel path,rv32gc,32,sky130,10000,0,2239955,2609304,4.46,2874562,887539,44.67,2763578,,,,,,
+2026-10-10 00:54,3c000ffef,superscalar_wally_decode,no,post upstream merge + #1911 CoreMark flags (new baseline),rv32gc,32,sky130,10000,0,1842492,2030156,5.41,2300572,605825,35.75,2394261,,,,,,
