@@ -101,7 +101,7 @@ frequency comparison.
 ```bash
 # CoreMark
 make -C $WALLY/benchmarks/coremark XLEN=32
-wsim rv32gc coremark --sim verilator
+wsim rv32gc --elf $WALLY/benchmarks/coremark/work/coremark.bare.riscv --test coremark --sim verilator
 
 # Synthesis -- must run from synthDC/, the Makefile uses relative ../src
 cd $WALLY/synthDC

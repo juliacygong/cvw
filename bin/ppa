@@ -77,7 +77,7 @@ def run_coremark(config, xlen):
             raise RuntimeError(f"CoreMark build failed:\n{out[-2000:]}")
 
     print(f"  running CoreMark on {config} ...")
-    rc, out = sh(f"wsim {config} coremark --sim verilator", cwd=WALLY)
+    rc, out = sh(f"wsim {config} --elf {elf} --test coremark --sim verilator", cwd=WALLY)
     if "Correct operation validated" not in out:
         raise RuntimeError(f"CoreMark did not validate:\n{out[-2000:]}")
 
