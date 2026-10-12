@@ -74,6 +74,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   logic                          IllegalBaseInstrD, IllegalFPUInstrD, IllegalIEUFPUInstrD;
   logic                          Mem2M;                           // The bundle's memory operation is slot 1's
   logic                          Illegal2M;                       // ... or slot 1 is an illegal instruction
+  logic                          IllegalComp2M;                   // ... or an illegal compressed one, flagged by its decompressor
   logic                          Replay2M;                        // ... either way slot 1 must re-run alone
   logic                          InstrPageFaultF, LoadPageFaultM, StoreAmoPageFaultM;
   logic                          LoadMisalignedFaultM, LoadAccessFaultM;
@@ -192,7 +193,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
     .PCLinkE, .PCSrcE, .IEUAdrE, .IEUAdrM, .PCE, .BPWrongE,  .BPWrongM,
     // Mem
     .CommittedF, .EPCM, .TrapVectorM, .RetM, .TrapM, .InvalidateICacheM, .CSRWriteFenceM,
-    .InstrD, .Instr2D, .Issue2D, .Issue2E, .Issue2M, .Issue2W, .Replay2M, .InstrM, .InstrOrigM, .PCM, .PCSpillM, .IClassM, .BPDirWrongM,
+    .InstrD, .Instr2D, .Issue2D, .Issue2E, .Issue2M, .Issue2W, .Replay2M, .IllegalComp2M, .InstrM, .InstrOrigM, .PCM, .PCSpillM, .IClassM, .BPDirWrongM,
     .BTAWrongM, .RASPredPCWrongM, .IClassWrongM,
     // Faults out
     .IllegalBaseInstrD, .IllegalFPUInstrD, .InstrPageFaultF, .IllegalIEUFPUInstrD, .InstrMisalignedFaultM,
@@ -300,7 +301,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   assign Replay2M = P.ZICSR_SUPPORTED &
                     ((Mem2M & (LoadMisalignedFaultM | LoadAccessFaultM | LoadPageFaultM |
                                StoreAmoMisalignedFaultM | StoreAmoAccessFaultM | StoreAmoPageFaultM))
-                     | Illegal2M);
+                     | Illegal2M | IllegalComp2M);
 
   // global stall and flush control
   hazard hzu(

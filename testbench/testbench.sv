@@ -745,6 +745,69 @@ module testbench;
   // slot 1: same PC, same raw and decompressed bits, and the same decode results (source registers,
   // immediate, register-file reads, branch/jump/illegal flags).
   // Remove this block once slot 1 issues: slot 1 then no longer reappears as the next slot 0.
+  // instrfields reads slot 1's register fields in Fetch from raw bytes, duplicating knowledge that
+  // decompress.sv also holds.  Duplication is only acceptable if a divergence is detected rather
+  // than silent -- a wrong Rd would let issue.sv permit a dependent pair, which corrupts data with
+  // no fault to catch it.  So compare the Fetch-stage fields against the Decode-stage decompressed
+  // instruction, which is the authority, every time slot 1 actually issues.
+  if (P.ICACHE_SUPPORTED) begin : fieldscheck
+    logic [4:0] RdF, Rs1F, Rs2F;
+    logic [1:0] MemRWF;
+    logic       RecF;
+    integer     FieldChecks = 0;
+    // These must mirror Instr2RawD's register exactly, which is a flopenl whose load ignores en:
+    // on a simultaneous flush and stall the instruction becomes a nop while Issue2D, a flopenrc
+    // whose clear requires en, keeps its old value.  Clearing RecF on flush suppresses the check for
+    // a slot that Fetch never examined.
+    always_ff @(posedge clk)
+      if (reset | dut.core.ifu.FlushD) RecF <= 1'b0;
+      else if (~dut.core.ifu.StallD) begin
+        RdF  <= dut.core.ifu.issue.Rd1F;
+        Rs1F <= dut.core.ifu.issue.Rs1_1F;
+        Rs2F   <= dut.core.ifu.issue.Rs2_1F;
+        MemRWF <= dut.core.ifu.issue.MemRW1F;
+        RecF   <= dut.core.ifu.issue.Recognized1F;
+      end
+    always_ff @(posedge clk)
+      // Only compare when the decompressor actually recognised the instruction.  For a reserved or
+      // HINT encoding -- c.slli with a zero shift amount, c.lwsp with rd = x0 -- it emits a default
+      // rather than a decode, so there is nothing meaningful to compare against.  Those encodings
+      // are handled instead by IllegalComp2M, which replays slot 1 so it traps as an unpaired
+      // instruction; instrfields deliberately does not try to enumerate the HINT rules.
+      if (~reset & dut.core.ifu.Issue2D & RecF & ~dut.core.ifu.IllegalCompInstr2D) begin
+        FieldChecks <= FieldChecks + 1;
+        // The property that matters is one-sided.  Naming a register the instruction does not touch
+        // only makes NoDependencyF refuse a pair it could have taken -- harmless.  *Missing* one
+        // permits a dependent pair, which corrupts data silently.  So a nonzero register in the
+        // decompressed form must be reported exactly; x0 means no dependency and anything is safe.
+        // This also accommodates the HINT encodings, which decompress.sv turns into a nop (see its
+        // line 156): instrfields names their registers, the nop touches none.
+        if ((dut.core.ifu.Instr2D[11:7] !== 5'b0) & (RdF !== dut.core.ifu.Instr2D[11:7]))
+          $fatal(1, "fieldscheck: Rd under-reported at PC %h: Fetch said x%0d, decompressed writes x%0d (raw %h)",
+                 dut.core.ifu.Instr2PCD, RdF, dut.core.ifu.Instr2D[11:7], dut.core.ifu.Instr2RawD);
+        // Only compare rs1 for formats that have one.  LUI, AUIPC and JAL are U- and J-type, so
+        // their [19:15] bits are immediate, not a register number -- c.lui decompresses to lui and
+        // those bits can be any value.  Likewise [24:20] is rs2 only for R-type, already gated below.
+        if (~(dut.core.ifu.Instr2D[6:0] inside {7'b0110111, 7'b0010111, 7'b1101111})
+            & (dut.core.ifu.Instr2D[19:15] !== 5'b0) & (Rs1F !== dut.core.ifu.Instr2D[19:15]))
+          $fatal(1, "fieldscheck: Rs1 under-reported at PC %h: Fetch said x%0d, decompressed reads x%0d (raw %h)",
+                 dut.core.ifu.Instr2PCD, Rs1F, dut.core.ifu.Instr2D[19:15], dut.core.ifu.Instr2RawD);
+        // Rs2 only exists as a register in the R-type expansion; for an OP-IMM expansion those bits
+        // are immediate, so comparing them would be meaningless.
+        if ((dut.core.ifu.Instr2D[6:0] == 7'b0110011) & (dut.core.ifu.Instr2D[24:20] !== 5'b0)
+            & (Rs2F !== dut.core.ifu.Instr2D[24:20]))
+          $fatal(1, "fieldscheck: Rs2 under-reported at PC %h: Fetch said x%0d, decompressed reads x%0d (raw %h)",
+                 dut.core.ifu.Instr2PCD, Rs2F, dut.core.ifu.Instr2D[24:20], dut.core.ifu.Instr2RawD);
+        // Memory-ness matters as much as the registers: OneMemOpF is the only thing keeping two
+        // accesses off the single load/store unit, so a compressed load that Fetch failed to
+        // recognise as memory would let a pair through that the LSU cannot serve.
+        if (MemRWF !== {dut.core.ifu.Instr2D[6:0] == 7'b0000011, dut.core.ifu.Instr2D[6:0] == 7'b0100011})
+          $fatal(1, "fieldscheck: MemRW mismatch at PC %h: Fetch said %b, decompressed opcode %h (raw %h)",
+                 dut.core.ifu.Instr2PCD, MemRWF, dut.core.ifu.Instr2D[6:0], dut.core.ifu.Instr2RawD);
+      end
+    final $display("fieldscheck: %0d slot-1 field extractions verified against the decompressor", FieldChecks);
+  end
+
   if (P.ICACHE_SUPPORTED) begin : decode2check
     logic              AdvanceD;              // Decode is loading a new instruction this cycle
     logic              CheckPending;          // Decode advanced last cycle, so compare now
@@ -868,6 +931,30 @@ module testbench;
     integer Replay2Ld = 0, Replay2St = 0;   // which kind of slot 1 memory operation had to be replayed
     integer BrWithMem2 = 0;                 // taken branch in slot 0 alongside a memory operation in slot 1
     integer ReplayStoreLeak = 0;            // a replayed slot 1 store that the LSU was not told to cancel
+
+    // Why a pair was refused.  Each counter records cycles where one term of Issue2F was the ONLY
+    // thing holding the pair back, so it reads as the marginal headroom of fixing that term alone
+    // rather than as a raw tally of a term that was one blocker among several.
+    integer PairOpportunity = 0;            // slot 1 held a complete instruction but the pair was refused
+    integer BlockBranch1 = 0;               // ... solely because slot 1 was a branch or jump
+    integer BlockBranch1Aligned = 0;        // ... and the bundle was 8-byte aligned, so a block-indexed BTB would see it
+    integer BlockCompressed = 0;            // ... solely because either slot was compressed
+    integer BlockDep = 0;                   // ... solely because slot 1 depended on slot 0
+    integer BlockSlot0 = 0;                 // ... solely because of slot 0 (predicted taken, jump, SYSTEM, fence)
+    integer BlockOneMem = 0;                // ... solely because both slots wanted the load/store unit
+    integer AnyCompressed = 0;              // ... compressed was A blocker, not necessarily the only one
+    integer AnyDep = 0;                     // ... likewise for the dependency check
+    integer BlockJump1 = 0;                 // ... solely because slot 1 was a jal/jalr (out of scope: the RAS)
+    integer BlockMDU1 = 0;                  // ... solely because slot 1 was a multiply or divide (one MDU)
+    integer BlockUnrec0 = 0;                // ... solely because SLOT 0's encoding is not in instrfields
+    integer BlockUnrec1 = 0;                // ... solely because SLOT 1's is
+    logic Cfi1F, Br1F, Jmp1F, Refused;
+    assign Br1F    = (dut.core.ifu.issue.Op1F == 7'b1100011);   // branch
+    assign Jmp1F   = (dut.core.ifu.issue.Op1F == 7'b1101111)    // jal
+                   | (dut.core.ifu.issue.Op1F == 7'b1100111);   // jalr
+    assign Cfi1F   = Br1F | Jmp1F;
+    assign Refused = dut.core.ifu.issue.Instr2ValidF & ~dut.core.ifu.Issue2F;
+
     logic Slot1Stall;
     // The slot 1 hazard only costs anything when slot 0 was not already stalling for its own reasons
     assign Slot1Stall = dut.core.ieu.Issue2D & dut.core.ieu.StructuralStall2D
@@ -879,6 +966,55 @@ module testbench;
           if (dut.core.ieu.StructuralStall0D) StallSlot0 <= StallSlot0 + 1;
           else if (Slot1Stall)                StallSlot1 <= StallSlot1 + 1;
           else                                StallOther <= StallOther + 1;
+        end
+        // "Solely" means every other term of Issue2F was satisfied, so this one term is what cost
+        // the pair.  A cycle blocked by two terms is counted in neither, which is the point: fixing
+        // one of them would not have paired it.
+        if (Refused) begin
+          PairOpportunity <= PairOpportunity + 1;
+          if (~dut.core.ifu.issue.Slot1CanPairF & Cfi1F
+              & dut.core.ifu.issue.BothRecognizedF & dut.core.ifu.issue.Slot0CanPairF
+              & dut.core.ifu.issue.NoDependencyF    & dut.core.ifu.issue.OneMemOpF) begin
+            if (Br1F) begin
+              BlockBranch1 <= BlockBranch1 + 1;
+              if (~dut.core.ifu.PCF[2]) BlockBranch1Aligned <= BlockBranch1Aligned + 1;
+            end else BlockJump1 <= BlockJump1 + 1;
+          end
+          if (~dut.core.ifu.issue.Slot1CanPairF & dut.core.ifu.issue.MExtF & ~Cfi1F
+              & dut.core.ifu.issue.BothRecognizedF & dut.core.ifu.issue.Slot0CanPairF
+              & dut.core.ifu.issue.NoDependencyF   & dut.core.ifu.issue.OneMemOpF)
+            BlockMDU1 <= BlockMDU1 + 1;
+          // A slot 1 multiply or divide is refused by ~MExtF inside Slot1CanPairF, so it needs its
+          // own attribution: it is not a branch, a jump, compressed, a dependency or a memory clash.
+          if (~dut.core.ifu.issue.Slot1CanPairF & dut.core.ifu.issue.MExtF & ~Cfi1F
+              & dut.core.ifu.issue.BothRecognizedF & dut.core.ifu.issue.Slot0CanPairF
+              & dut.core.ifu.issue.NoDependencyF   & dut.core.ifu.issue.OneMemOpF) begin
+            BlockMDU1 <= BlockMDU1 + 1;
+          end
+          if (~dut.core.ifu.issue.BothRecognizedF) AnyCompressed <= AnyCompressed + 1;
+          if (~dut.core.ifu.issue.NoDependencyF)      AnyDep        <= AnyDep + 1;
+          if (~dut.core.ifu.issue.BothRecognizedF
+              & dut.core.ifu.issue.Slot0CanPairF & dut.core.ifu.issue.Slot1CanPairF
+              & dut.core.ifu.issue.NoDependencyF & dut.core.ifu.issue.OneMemOpF) begin
+            BlockCompressed <= BlockCompressed + 1;
+            // Which slot's encoding instrfields failed to recognise.  A gap in slot 0 is pure
+            // conservatism -- slot 0 executes everything it always did -- so it bounds what the
+            // class-split change would recover without any datapath work.
+            if (~dut.core.ifu.issue.Recognized0F) BlockUnrec0 <= BlockUnrec0 + 1;
+            if (~dut.core.ifu.issue.Recognized1F) BlockUnrec1 <= BlockUnrec1 + 1;
+          end
+          if (~dut.core.ifu.issue.NoDependencyF
+              & dut.core.ifu.issue.BothRecognizedF & dut.core.ifu.issue.Slot0CanPairF
+              & dut.core.ifu.issue.Slot1CanPairF    & dut.core.ifu.issue.OneMemOpF)
+            BlockDep <= BlockDep + 1;
+          if (~dut.core.ifu.issue.Slot0CanPairF
+              & dut.core.ifu.issue.BothRecognizedF & dut.core.ifu.issue.Slot1CanPairF
+              & dut.core.ifu.issue.NoDependencyF     & dut.core.ifu.issue.OneMemOpF)
+            BlockSlot0 <= BlockSlot0 + 1;
+          if (~dut.core.ifu.issue.OneMemOpF
+              & dut.core.ifu.issue.BothRecognizedF & dut.core.ifu.issue.Slot0CanPairF
+              & dut.core.ifu.issue.Slot1CanPairF     & dut.core.ifu.issue.NoDependencyF)
+            BlockOneMem <= BlockOneMem + 1;
         end
         if (dut.core.ifu.BPWrongE)                             FlushMispredict <= FlushMispredict + 1;
         if (dut.core.ifu.Kill2E & dut.core.ifu.Issue2E)         Kills <= Kills + 1;
@@ -910,6 +1046,8 @@ module testbench;
     final begin
       $display("overhead: %0d cycles | stall slot0=%0d slot1=%0d other=%0d | mispredict=%0d | slot1 kills=%0d | slot1 mem=%0d replays=%0d | hazards: loaduse2=%0d bundlestore=%0d | replay ld=%0d st=%0d | branch+slot1mem=%0d | replay store leaks=%0d (must be 0)",
                Cycles, StallSlot0, StallSlot1, StallOther, FlushMispredict, Kills, Mem2, Replays, LoadUse2, BundleStore, Replay2Ld, Replay2St, BrWithMem2, ReplayStoreLeak);
+      $display("pairing refused: %0d opportunities | sole cause: branch in slot1=%0d (8B-aligned=%0d) jump in slot1=%0d mdu in slot1=%0d compressed=%0d dependency=%0d slot0=%0d onemem=%0d (unrec slot0=%0d slot1=%0d) | any-cause: compressed=%0d dependency=%0d",
+               PairOpportunity, BlockBranch1, BlockBranch1Aligned, BlockJump1, BlockMDU1, BlockCompressed, BlockDep, BlockSlot0, BlockOneMem, BlockUnrec0, BlockUnrec1, AnyCompressed, AnyDep);
       if (P.ZICSR_SUPPORTED)
         $display("minstret check: committed=%0d minstret=%0d %s", Committed,
                  dut.core.priv.priv.csr.counters.HPMCOUNTER_REGW[2],
