@@ -55,6 +55,7 @@ module bpred import cvw::*;  #(parameter cvw_t P) (
   // Branch and jump outcome
   input  logic             InstrValidD, InstrValidE,
   input  logic             Commit2E,                 // Slot 1 will commit alongside slot 0, so the bundle is two instructions long
+  input  logic             Compressed2E,             // ... and slot 1 is 16 bits, so the bundle ends 2 bytes after it rather than 4
   input  logic             BranchD, BranchE,
   input  logic             JumpD, JumpE,
   input  logic             PCSrcE,                    // Execution stage branch is taken
@@ -195,7 +196,7 @@ module bpred import cvw::*;  #(parameter cvw_t P) (
   // The bundle is two instructions long only if slot 1 actually commits.  When slot 1 is killed --
   // because slot 0 turned out to be a taken branch -- the fall-through is slot 1's own address, so
   // this comparison against PCD makes BPWrongE fire and redirect there, re-executing it as slot 0.
-  assign PCFallThroughE = Commit2E ? PCLinkE + 'd4 : PCLinkE;
+  assign PCFallThroughE = Commit2E ? PCLinkE + (Compressed2E ? 'd2 : 'd4) : PCLinkE;
   mux2 #(P.XLEN) pccorrectemux(PCFallThroughE, IEUAdrE, PCSrcE, PCCorrectE);
 
   // If the fence/csrw was predicted as a taken branch then we select PCF, rather than PCE.

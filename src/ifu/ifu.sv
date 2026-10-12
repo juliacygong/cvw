@@ -65,6 +65,7 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
   output logic                 Issue2D, Issue2E,                         // Slot 1 issues alongside slot 0 in Decode / Execute
   output logic                 Issue2M, Issue2W,                         // ... and in Memory / Writeback, where it commits
   input  logic                 Replay2M,                                 // Slot 1's memory operation faulted; refetch it alone
+  output logic                 IllegalComp2M,                            // Slot 1 is an illegal compressed instruction; replay it
   output logic [31:0]          InstrM,                                   // The decoded instruction in Memory stage
   output logic [31:0]          InstrOrigM,                               // Original compressed or uncompressed instruction in Memory stage for Illegal Instruction XTVAL
   output logic [P.XLEN-1:0]    PCM,                                      // Memory stage instruction address
@@ -119,7 +120,6 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
   logic                        InstrMisalignedFaultE;                    // Branch/jump target not aligned to 4 bytes if no compressed allowed (2 bytes if allowed)
   logic [P.XLEN-1:0]           PCPlus2or4F;                              // PCF + 2 (CompressedF) or PCF + 4 (Non-compressed): the address of slot 1
   logic [P.XLEN-1:0]           PCNextSeqF;                               // Fall-through PC: the first instruction not executed this cycle (PCPlus2or4F, or PCF + 8 when both slots issue)
-  logic [P.XLEN-1:2]           PCPlus8F;                                 // PCF + 8, for a bundle of two uncompressed instructions
   logic [P.XLEN-1:0]           PCSpillNextF;                             // Next PCF after possible + 2 to handle spill
   logic [P.XLEN-1:2]           PCPlus4F;                                 // PCPlus4F is always PCF + 4.  Fancy way to compute PCPlus2or4F
   logic [P.XLEN-1:0]           PCD;                                      // Decode stage instruction address
@@ -133,7 +133,10 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
   logic [FETCHWIDTH-1:0]       ICacheInstrF;                             // Two instruction slots from the I$: [31:0] at PCSpillF, [63:32] the next 32 bits
   logic [FETCHWIDTH-1:0]       FetchDataF;                               // Fetch window from the IROM, I$, or bus: [31:0] instr at PCSpillF, [63:32] next 32 bits
   logic [31:0]                 InstrRawF;                                // First fetched instruction (slot 0) from the IROM, I$, or bus
-  logic                        CompressedF, CompressedE;                 // The fetched instruction is compressed
+  logic                        CompressedF, CompressedE, CompressedM;    // The fetched instruction is compressed
+  logic                        Compressed2F, Compressed2E;               // Slot 1 is a 16-bit instruction
+  logic                        IllegalCompInstr2D;                       // Slot 1's decompressor rejected its encoding
+  logic [P.XLEN-1:0]           PCBundleEndF;                             // Address just past both slots of the bundle
   logic [31:0]                 PostSpillInstrRawF;                       // Fetch instruction after merge two halves of spill
   logic [31:0]                 InstrRawD;                                // Non-decompressed instruction in the Decode stage
   logic                        IllegalIEUInstrD;                         // IEU Instruction (regular or compressed) is not good
@@ -373,6 +376,7 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
   // Slot 1 follows it: it starts at bit 16 if slot 0 is compressed, else at bit 32.
   // Each slot is then expanded by its own decompressor in the Decode stage.
   assign InstrRawF  = FetchDataF[31:0];
+  assign Compressed2F = P.ZCA_SUPPORTED & ~&Instr2RawF[1:0];
   mux2 #(32) instr2mux(FetchDataF[63:32], FetchDataF[47:16], CompressedF, Instr2RawF);
 
   // Slot 0 is always complete (the spill logic fetches a second line when it straddles one).
@@ -384,9 +388,7 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
     localparam OFFSETLEN = $clog2(LINEBYTES);
     logic [OFFSETLEN:0] Instr2OffsetF;                                    // Byte offset of slot 1 within the line
     logic [OFFSETLEN:0] Instr2EndF;                                       // Byte offset just past the end of slot 1
-    logic               Compressed2F;                                     // Slot 1 is a 16-bit instruction
     assign Instr2OffsetF = {1'b0, PCF[OFFSETLEN-1:0]} + (CompressedF ? 'd2 : 'd4);
-    assign Compressed2F  = ~&Instr2RawF[1:0];
     assign Instr2EndF    = Instr2OffsetF + (Compressed2F ? 'd2 : 'd4);
     assign Instr2ValidF  = CacheableF & ~SelIROM & ~SelSpillF & (Instr2EndF <= LINEBYTES[OFFSETLEN:0]);
   end else begin : instr2valid
@@ -419,11 +421,11 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
   ////////////////////////////////////////////////////////////////////////////////////////////////
 
   // Both redirects here come from the Memory stage.  A replay sends fetch back to slot 1's own PC,
-  // which is PCM + 4 because the issue rules require both slots of a bundle to be uncompressed.  The
-  // two selects cannot be high together: CSRWriteFenceM means slot 0 is a CSR write or a fence, and
+  // which is PCM advanced by slot 0's length -- 2 when slot 0 was compressed, 4 otherwise.  The two
+  // selects cannot be high together: CSRWriteFenceM means slot 0 is a CSR write or a fence, and
   // those are SYSTEM and MISC_MEM, which Slot0CanPairF refuses to pair -- so no priority is needed.
   if(P.ZICSR_SUPPORTED | P.ZIFENCEI_SUPPORTED) begin
-    mux2 #(P.XLEN) pcredirectmux(NextValidPCE, PCM + 'd4, Replay2M, RedirectPCM);
+    mux2 #(P.XLEN) pcredirectmux(NextValidPCE, PCM + (CompressedM ? 'd2 : 'd4), Replay2M, RedirectPCM);
     mux2 #(P.XLEN) pcmux2(.d0(PC1NextF), .d1(RedirectPCM), .s(CSRWriteFenceM | Replay2M),.y(PC2NextF));
   end else assign PC2NextF = PC1NextF;
 
@@ -447,11 +449,12 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
     assign PCPlus2or4F = {PCPlus4F, PCF[1:0]}; // always add 4 if compressed instructions are not supported
   end
 
-  // When both slots issue, fetch continues after the pair rather than after slot 0.  The issue rules
-  // require both to be uncompressed, so the bundle is always exactly 8 bytes.  PCPlus2or4F stays the
-  // address of slot 1 itself, which is what the Decode-stage slot 1 PC register needs.
-  assign PCPlus8F = PCF[P.XLEN-1:2] + 2;
-  mux2 #(P.XLEN) pcnextseqmux({PCPlus8F, PCF[1:0]}, PCPlus2or4F, ~Issue2F, PCNextSeqF);
+  // When both slots issue, fetch continues after the pair rather than after slot 0.  A bundle is 4, 6
+  // or 8 bytes depending on each slot's length, so the end is slot 1's own address advanced by slot
+  // 1's length.  PCPlus2or4F stays the address of slot 1 itself, which is what the Decode-stage slot 1
+  // PC register needs.
+  assign PCBundleEndF = PCPlus2or4F + (Compressed2F ? 'd2 : 'd4);
+  mux2 #(P.XLEN) pcnextseqmux(PCBundleEndF, PCPlus2or4F, ~Issue2F, PCNextSeqF);
 
   ////////////////////////////////////////////////////////////////////////////////////////////////
   // Branch and Jump Predictor
@@ -459,7 +462,7 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
   if (P.BPRED_SUPPORTED) begin : bpred
     bpred #(P) bpred(.clk, .reset,
                 .StallF, .StallD, .StallE, .StallM, .StallW,
-                .FlushD, .FlushE, .FlushM, .FlushW, .InstrValidD, .InstrValidE, .Commit2E,
+                .FlushD, .FlushE, .FlushM, .FlushW, .InstrValidD, .InstrValidE, .Commit2E, .Compressed2E,
                 .BranchD, .BranchE, .JumpD, .JumpE,
                 .InstrD, .PCNextF, .PCNextSeqF, .PC1NextF, .BPPCSrcF, .PCE, .PCM, .PCSrcE, .IEUAdrE, .IEUAdrM, .PCF, .NextValidPCE,
                 .PCD, .PCLinkE, .IClassM, .BPWrongE, .PostSpillInstrRawF, .BPWrongM,
@@ -498,15 +501,26 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
 
   // expand 16-bit compressed instructions to 32 bits
   if (P.ZCA_SUPPORTED) begin : decomp
-    logic IllegalCompInstrD, IllegalCompInstr2D;
+    logic IllegalCompInstrD;
     decompress #(P) decomp(.InstrRawD, .InstrD, .IllegalCompInstrD);
     assign IllegalIEUInstrD = IllegalBaseInstrD | IllegalCompInstrD; // illegal if bad 32 or 16-bit instr
-    // Slot 1 gets its own decompressor.  Its illegal flag is not used until slot 1 can issue.
+    // Slot 1 gets its own decompressor.  Slot 0's illegal flag joins IllegalIEUInstrD above, but
+    // slot 1 has no such path -- the privileged unit describes only slot 0 -- so an illegal
+    // compressed instruction in slot 1 is sent down the replay route instead, exactly as an illegal
+    // 32-bit one is.  Carried to Memory so it reaches Replay2M, with the Execute register flushed
+    // for an unpaired slot 1 (mirroring controller c2) and the result qualified by Issue2M, so a
+    // slot 1 abandoned in Execute never triggers a replay.
+    logic IllegalCompInstr2E, IllegalCompInstr2M;
     decompress #(P) decomp2(.InstrRawD(Instr2RawD), .InstrD(Instr2D), .IllegalCompInstrD(IllegalCompInstr2D));
+    flopenrc #(1) IllegalComp2EReg(clk, reset, FlushE | ~Issue2D, ~StallE, IllegalCompInstr2D, IllegalCompInstr2E);
+    flopenrc #(1) IllegalComp2MReg(clk, reset, FlushM, ~StallM, IllegalCompInstr2E, IllegalCompInstr2M);
+    assign IllegalComp2M = IllegalCompInstr2M & Issue2M;
   end else begin : decomp
     assign InstrD = InstrRawD;
     assign IllegalIEUInstrD = IllegalBaseInstrD;
     assign Instr2D = Instr2RawD;
+    assign IllegalComp2M = 1'b0;
+    assign IllegalCompInstr2D = 1'b0;
   end
   assign IllegalIEUFPUInstrD = IllegalIEUInstrD & (IllegalFPUInstrD | !P.F_SUPPORTED);
 
@@ -557,17 +571,22 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
   // If compressed instructions are supported, increment PCLink by 2 or 4 for a jal.  Otherwise, just by 4
   if (P.ZCA_SUPPORTED) begin
     logic CompressedD;  // instruction is compressed
+    logic Compressed2D; // slot 1 is compressed
     flopenrc #(1) CompressedDReg(clk, reset, FlushD, ~StallD, CompressedF, CompressedD);
     flopenrc #(1) CompressedEReg(clk, reset, FlushE, ~StallE, CompressedD, CompressedE);
     assign PCLinkE = PCE + (CompressedE ? 'd2 : 'd4); // 'd4 means 4 but stops Design Compiler complaining about signed to unsigned conversion
+    // Slot 1's length, carried alongside slot 0's.  bpred.sv needs it to place the bundle's
+    // fall-through address, which is slot 1's PC advanced by slot 1's own length.
+    flopenrc #(1) Compressed2DReg(clk, reset, FlushD, ~StallD, Compressed2F, Compressed2D);
+    flopenrc #(1) Compressed2EReg(clk, reset, FlushE, ~StallE, Compressed2D, Compressed2E);
   end else begin
     assign CompressedE = 1'b0;
+    assign Compressed2E = 1'b0;
     assign PCLinkE = PCE + 'd4;
   end
 
   // pipeline original compressed instruction in case it is needed for XTVAL on an illegal instruction exception
   if (P.ZICSR_SUPPORTED & P.ZCA_SUPPORTED | 1) begin
-    logic CompressedM; // instruction is compressed
     flopenrc #(16) InstrRawEReg(clk, reset, FlushE, ~StallE, InstrRawD[15:0], InstrRawE);
     flopenrc #(16) InstrRawMReg(clk, reset, FlushM, ~StallM, InstrRawE, InstrRawM);
     flopenrc #(1)  CompressedMReg(clk, reset, FlushM, ~StallM, CompressedE, CompressedM);

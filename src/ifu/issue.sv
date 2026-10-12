@@ -63,33 +63,42 @@ module issue import cvw::*;  #(parameter cvw_t P) (
   localparam [6:0] JALR     = 7'b1100111;
   localparam [6:0] SYSTEM   = 7'b1110011;
   localparam [6:0] MISC_MEM = 7'b0001111;
-  // Opcodes that use the load/store unit.  Only LOAD and STORE may appear in slot 1; the rest are
-  // listed so that a memory operation in slot 0 can be recognised and kept from pairing with one.
+  // LOAD is still named for the access-width check below.  The other memory opcodes -- STORE, the
+  // floating-point loads and stores, and the atomics -- are no longer listed here: instrfields
+  // reports which slots occupy the load/store unit, for compressed and 32-bit instructions alike.
   localparam [6:0] LOAD     = 7'b0000011;
-  localparam [6:0] STORE    = 7'b0100011;
-  localparam [6:0] LOAD_FP  = 7'b0000111;   // flw, fld -- slot 0 only, but still occupies the LSU
-  localparam [6:0] STORE_FP = 7'b0100111;   // fsw, fsd -- likewise
-  localparam [6:0] AMO      = 7'b0101111;   // lr, sc and the AMOs -- likewise
 
   logic [6:0] Op0F, Op1F, Funct7_1F;
   logic [2:0] Funct3_1F;
-  logic [4:0] Rd0F, Rs1_1F, Rs2_1F, Rd1F;
-  logic       BothUncompressedF, Slot0CanPairF, Slot1CanPairF, NoDependencyF;
+  logic [4:0] Rd0F;                          // What slot 0 writes -- its sources do not matter, it runs first
+  logic [4:0] Rd1F, Rs1_1F, Rs2_1F;          // Slot 1's register fields, whatever its length
+  logic       Recognized0F, Recognized1F;    // instrfields decoded this slot's fields
+  logic [1:0] MemRW0F, MemRW1F;              // ... and whether it uses the load/store unit
+  logic       IsBranch1F;                    // ... and whether slot 1 is a conditional branch
+  logic       BothRecognizedF, Slot0CanPairF, Slot1CanPairF, NoDependencyF;
   logic       Slot0IsMemF, Slot1IsMemF, OneMemOpF;
   logic       MExtF;                      // Slot 1 is a multiply/divide, which needs the one MDU
 
   assign Op0F      = Instr0F[6:0];
-  assign Rd0F      = Instr0F[11:7];
   assign Op1F      = Instr1F[6:0];
   assign Funct3_1F = Instr1F[14:12];
   assign Funct7_1F = Instr1F[31:25];
-  assign Rs1_1F    = Instr1F[19:15];
-  assign Rs2_1F    = Instr1F[24:20];
-  assign Rd1F      = Instr1F[11:7];
 
-  // Both instructions must be 32-bit.  A compressed instruction would need its decompressor to
-  // know its length and register fields, and those live in the Decode stage.
-  assign BothUncompressedF = (&Instr0F[1:0]) & (&Instr1F[1:0]);
+  // The register fields come from instrfields rather than from fixed bit positions, because a
+  // compressed instruction keeps them elsewhere.  Each slot reports Recognized low for any encoding
+  // whose fields are not decoded, and the dependency check below refuses to pair in that case.
+  // Slot 0's sources are not connected: only what it writes can create a hazard with slot 1.  A
+  // write-after-read cannot arise, because slot 0 read its operands in Decode and slot 1 does not
+  // write until Writeback, and the two move together through the pipeline.
+  instrfields #(P) fields0(.Instr(Instr0F), .Rd(Rd0F), .Rs1(), .Rs2(), .MemRW(MemRW0F), .IsBranch(), .Recognized(Recognized0F));
+  instrfields #(P) fields1(.Instr(Instr1F), .Rd(Rd1F), .Rs1(Rs1_1F), .Rs2(Rs2_1F), .MemRW(MemRW1F), .IsBranch(IsBranch1F), .Recognized(Recognized1F));
+
+  // A slot is admitted only if its register fields are known.  For a 32-bit instruction that is
+  // always true, so this reduces to the previous behaviour; for a compressed one it is instrfields'
+  // verdict, which is low for every format not decoded there.  That is what makes a gap in
+  // instrfields cost pairing opportunities rather than correctness -- and it covers slot 0 too,
+  // whose Op0F comparisons below are meaningless when it is compressed.
+  assign BothRecognizedF = Recognized0F & Recognized1F;
 
   // Which instructions may carry a partner in slot 1.  These all still execute normally on their
   // own when they cannot pair.
@@ -126,7 +135,16 @@ module issue import cvw::*;  #(parameter cvw_t P) (
   assign MExtF = (Funct7_1F == 7'b0000001);
 
   always_comb
-    case (Op1F)
+    // A compressed slot 1 cannot go through the opcode whitelist below -- Instr1F[6:0] is not an
+    // opcode for a 16-bit instruction.  instrfields vouches for it instead: the formats it decodes
+    // today are all single-cycle ALU operations, so recognition and class-legality coincide.  Adding
+    // a non-ALU compressed format there for its register fields must come with a separate class
+    // signal, or it would silently become pairable here.
+    // A compressed slot 1 is admitted on instrfields' recognition, minus a store.  Stores stay in
+    // slot 0 for the replay reason described in the LOAD arm below -- the same restriction the
+    // 32-bit STORE opcode gets by having no arm at all.
+    if (~&Instr1F[1:0]) Slot1CanPairF = Recognized1F & ~MemRW1F[0] & ~IsBranch1F;
+    else case (Op1F)
       LUI, AUIPC: Slot1CanPairF = 1'b1;
       OP_IMM:     Slot1CanPairF = 1'b1;
       OP:         Slot1CanPairF = ~MExtF;
@@ -166,12 +184,11 @@ module issue import cvw::*;  #(parameter cvw_t P) (
   // may sit in either slot, and ieu.sv steers the LSU's inputs to whichever one holds it.  Slot 0's
   // list is much the wider: slot 1 may only ever hold a LOAD, while slot 0 may also hold a store, a
   // floating-point load or store, or an atomic, each of which occupies the LSU just the same.
-  assign Slot0IsMemF = (Op0F == LOAD) | (Op0F == STORE) | (Op0F == LOAD_FP) |
-                       (Op0F == STORE_FP) | (Op0F == AMO);
-  assign Slot1IsMemF = (Op1F == LOAD);
+  assign Slot0IsMemF = |MemRW0F;
+  assign Slot1IsMemF = |MemRW1F;
   assign OneMemOpF   = ~(Slot0IsMemF & Slot1IsMemF);
 
-  assign Issue2F = Instr2ValidF & BothUncompressedF & Slot0CanPairF & Slot1CanPairF &
+  assign Issue2F = Instr2ValidF & BothRecognizedF & Slot0CanPairF & Slot1CanPairF &
                    NoDependencyF & OneMemOpF;
 
 endmodule
