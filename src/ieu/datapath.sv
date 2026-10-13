@@ -138,8 +138,24 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   extend #(P)        ext2(.InstrD(Instr2D[31:7]), .ImmSrcD(ImmSrc2D), .ImmExtD(ImmExt2D));   // slot 1
 
   // Execute stage pipeline register and logic
-  flopenrc #(P.XLEN) RD1EReg(clk, reset, FlushE, ~StallE, R1D, R1E);
-  flopenrc #(P.XLEN) RD2EReg(clk, reset, FlushE, ~StallE, R2D, R2E);
+  //
+  // Operand capture.  The Execute stage can be held while Memory and Writeback keep moving: a divide
+  // holds it for its whole iteration (DivBusyE, FDivBusyE) while older instructions drain and bubbles
+  // follow them.  An operand that was being forwarded from Memory or Writeback when the stall began
+  // then loses its source as the producer retires, and R1E/R2E still hold the register file value read
+  // in Decode, before the producer wrote it.  Single-issue Wally never meets this, because the only
+  // instruction in Execute during such a stall is the divide itself, which latches its operands when
+  // it starts.  With two slots the other instruction of the bundle sits there too, so the registers
+  // reload the forwarded operand every cycle of the stall, and hold the right value once forwarding
+  // stops.  The two cases cannot overlap with a flush: StallE without StallM means StallECause, which
+  // is already gated by ~FlushECause, so FlushE is low whenever CaptureE is high.
+  logic              CaptureE;                       // Execute held while Memory advances: keep forwarded operands
+  logic [P.XLEN-1:0] R1ENext, R2ENext, R1_2ENext, R2_2ENext;
+  assign CaptureE = StallE & ~StallM;
+  mux2  #(P.XLEN)  r1enextmux(R1D, ForwardedSrcAE, CaptureE, R1ENext);
+  mux2  #(P.XLEN)  r2enextmux(R2D, ForwardedSrcBE, CaptureE, R2ENext);
+  flopenrc #(P.XLEN) RD1EReg(clk, reset, FlushE, ~StallE | CaptureE, R1ENext, R1E);
+  flopenrc #(P.XLEN) RD2EReg(clk, reset, FlushE, ~StallE | CaptureE, R2ENext, R2E);
   flopenrc #(P.XLEN) ImmExtEReg(clk, reset, FlushE, ~StallE, ImmExtD, ImmExtE);
 
   // Forwarding sources in the order each lane's select encodes them: no forward, own Writeback,
@@ -159,8 +175,10 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
 
   // Slot 1 (superscalar) Execute stage, mirroring slot 0 above.  Its result is computed but not
   // committed yet, so slot 1 has no Memory-stage register and no branch/jump redirect.
-  flopenrc #(P.XLEN) RD1_2EReg(clk, reset, FlushE, ~StallE, R1_2D, R1_2E);
-  flopenrc #(P.XLEN) RD2_2EReg(clk, reset, FlushE, ~StallE, R2_2D, R2_2E);
+  mux2  #(P.XLEN)  r1_2enextmux(R1_2D, ForwardedSrc2AE, CaptureE, R1_2ENext);   // operand capture, as for slot 0
+  mux2  #(P.XLEN)  r2_2enextmux(R2_2D, ForwardedSrc2BE, CaptureE, R2_2ENext);
+  flopenrc #(P.XLEN) RD1_2EReg(clk, reset, FlushE, ~StallE | CaptureE, R1_2ENext, R1_2E);
+  flopenrc #(P.XLEN) RD2_2EReg(clk, reset, FlushE, ~StallE | CaptureE, R2_2ENext, R2_2E);
   flopenrc #(P.XLEN) ImmExt2EReg(clk, reset, FlushE, ~StallE, ImmExt2D, ImmExt2E);
 
   mux5  #(P.XLEN)  faemux2(R1_2E, ResultW2, IEUResult2M, ResultW, IFResultM, Forward2AE, ForwardedSrc2AE);
@@ -197,8 +215,9 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
 
   // Slot 1 Memory and Writeback.  Slot 0 needs a mux5 in Writeback to choose between the ALU, a load,
   // a CSR read, the multiply/divide unit and a store-conditional.  Slot 1 can only be an ALU operation,
-  // a load or a multiply, so it needs just three of those, selected by the same ResultSrc encoding
-  // slot 0 uses.  A slot 1 multiply's product is always the MDU's: the FPU only ever does divides.
+  // a load or a multiply/divide, so it needs just three of those, selected by the same ResultSrc
+  // encoding slot 0 uses.  A slot 1 MDU result is always the MDU's own: the FPU only ever divides, and
+  // issue.sv admits slot 1 divides only in configurations whose divider is the MDU's.
   flopenrc #(P.XLEN) IEUResult2MReg(clk, reset, FlushM, ~StallM, IEUResult2E, IEUResult2M);
   flopenrc #(P.XLEN) IEUResult2WReg(clk, reset, FlushW, ~StallW, IEUResult2M, IEUResult2W);
   always_comb

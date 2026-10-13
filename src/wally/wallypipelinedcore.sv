@@ -91,6 +91,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   logic [P.XLEN-1:0]             MDUSrcAE, MDUSrcBE;              // MDU operands, from the slot holding the bundle's MDU operation
   logic [2:0]                    MDUFunct3E, MDUFunct3M;          // MDU operation, from that slot
   logic                          MDUW64E;                         // MDU W-type, from that slot
+  logic                          MDUIntDivE;                      // MDU integer divide, from that slot
   logic                          ENVCFG_ADUE;                     // HPTW A/D Update enable
   logic                          ENVCFG_PBMTE;                    // Page-based memory type enable
   logic [3:0]                    ENVCFG_CBE;                      // Cache Block operation enables
@@ -214,7 +215,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
      // Execute Stage interface
      .PCE, .PCLinkE, .FWriteIntE, .FCvtIntE, .IEUAdrE, .LSUAdrE, .IntDivE, .W64E,
      .Funct3E, .ForwardedSrcAE, .ForwardedSrcBE, .MDUActiveE, .CMOpM, .IFUPrefetchE, .LSUPrefetchM,
-     .MDUSrcAE, .MDUSrcBE, .MDUFunct3E, .MDUFunct3M, .MDUW64E,
+     .MDUSrcAE, .MDUSrcBE, .MDUFunct3E, .MDUFunct3M, .MDUW64E, .MDUIntDivE,
      // Memory stage interface
      .SquashSCW,  // from LSU
      .MemRWE,     // read/write control goes to LSU
@@ -357,11 +358,11 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
 
   // multiply/divide unit
   if (P.ZMMUL_SUPPORTED) begin : mdu
-    // The operands, funct3 and W64 come from whichever slot holds the bundle's MDU operation (see
-    // ieu.sv).  IntDivE stays slot 0's: issue.sv admits only multiplies to slot 1.
+    // The operands, funct3, W64 and divide start come from whichever slot holds the bundle's MDU
+    // operation (see ieu.sv).
     mdu #(P) mdu(.clk, .reset, .StallM, .StallW, .FlushE, .FlushM, .FlushW,
       .ForwardedSrcAE(MDUSrcAE), .ForwardedSrcBE(MDUSrcBE),
-      .Funct3E(MDUFunct3E), .Funct3M(MDUFunct3M), .IntDivE, .W64E(MDUW64E), .MDUActiveE,
+      .Funct3E(MDUFunct3E), .Funct3M(MDUFunct3M), .IntDivE(MDUIntDivE), .W64E(MDUW64E), .MDUActiveE,
       .MDUResultW, .DivBusyE);
   end else begin // no M instructions supported
     assign MDUResultW = '0;

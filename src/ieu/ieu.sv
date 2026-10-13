@@ -55,6 +55,7 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
   output logic [P.XLEN-1:0] MDUSrcAE, MDUSrcBE,              // MDU operands, from whichever slot holds the bundle's multiply
   output logic [2:0]        MDUFunct3E, MDUFunct3M,          // MDU operation, from that slot
   output logic              MDUW64E,                         // MDU W-type, from that slot
+  output logic              MDUIntDivE,                      // MDU integer divide, from that slot
   output logic [3:0]        CMOpM,                           // 1: cbo.inval; 2: cbo.clean; 4: cbo.flush; 8: cbo.zero
   output logic              IFUPrefetchE,                    // instruction prefetch
   output logic              LSUPrefetchM,                    // datata prefetch
@@ -153,9 +154,10 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
   logic [2:0] Funct3_2M;                                     // Slot 1 access size and signedness
   logic [2:0] ResultSrc2W;                                   // Slot 1 writeback source select
 
-  // Slot 1 multiply.  The core has one multiply/divide unit, so at most one slot of a bundle may hold
-  // an MDU operation; Mdu2E/Mdu2M say it is slot 1's and steer the MDU's inputs to lane 2.
+  // Slot 1 multiply/divide.  The core has one multiply/divide unit, so at most one slot of a bundle may
+  // hold an MDU operation; Mdu2E/Mdu2M say it is slot 1's and steer the MDU's inputs to lane 2.
   logic       MDUActive0E, MDUActive2E;                      // Slot 0 / slot 1 holds a multiply or divide
+  logic       IntDiv2E;                                      // Slot 1 holds a divide
   logic       Mdu2E, Mdu2M;                                  // The bundle's MDU operation is slot 1's
 
   logic [2:0] ForwardAE, ForwardBE;                          // Select signals for forwarding multiplexers
@@ -205,7 +207,7 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
     // come out as zero on their own, so nothing downstream needs to know about pairing.
     .StallE, .FlushE(FlushE | ~Issue2D), .FlagsE(2'b00), .FWriteIntE(1'b0),
     .PCSrcE(), .ALUSrcAE(ALUSrcA2E), .ALUSrcBE(ALUSrcB2E), .ALUResultSrcE(ALUResultSrc2E), .ALUSelectE(ALUSelect2E),
-    .Funct3E(Funct3_2E), .Funct7E(Funct7_2E), .IntDivE(), .W64E(W64_2E), .UW64E(UW64_2E), .SubArithE(SubArith2E),
+    .Funct3E(Funct3_2E), .Funct7E(Funct7_2E), .IntDivE(IntDiv2E), .W64E(W64_2E), .UW64E(UW64_2E), .SubArithE(SubArith2E),
     .BranchD(Branch2D), .BranchE(), .JumpD(Jump2D), .JumpE(Jump2E),
     .BranchSignedE(), .BSelectE(BSelect2E), .ZBBSelectE(ZBBSelect2E), .BALUControlE(BALUControl2E),
     .BMUActiveE(BMUActive2E), .CZeroE(CZero2E), .MDUActiveE(MDUActive2E),
@@ -268,21 +270,24 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
   mux2 #(3) memfunct3mmux(Funct3M, Funct3_2M, Mem2M, MemFunct3M);
 
   // Which lane owns the single multiply/divide unit, by the same reasoning as the load/store unit
-  // above: the issue rules permit at most one MDU operation per bundle, and only a multiply may be in
-  // slot 1.  The multiplier has no enable and no side effect -- it multiplies whatever it is given
-  // every cycle, and only the selected, committed result is ever written -- so unlike Mem2E this
-  // select needs no ~PCSrcE.  A slot 1 multiply killed by a taken branch in slot 0 computes a product
-  // that RegWrite2M/W, gated by Issue2M/W, never write.  MDUActive2E comes straight out of c2's
-  // Execute register, so the select adds no logic ahead of the operand muxes in datapath.sv.
+  // above: the issue rules permit at most one MDU operation per bundle.  Unlike Mem2E this select
+  // needs no ~PCSrcE.  The multiplier has no enable and no side effect -- it multiplies whatever it is
+  // given every cycle, and only the selected, committed result is ever written -- so a slot 1 multiply
+  // killed by a taken branch in slot 0 computes a product that RegWrite2M/W, gated by Issue2M/W, never
+  // write.  The divider does act when it starts, but issue.sv never pairs a slot 1 divide with a slot
+  // 0 branch, so a slot 1 divide that reaches Execute always commits.  MDUActive2E comes straight out
+  // of c2's Execute register, so the select adds no logic ahead of the operand muxes in datapath.sv.
   //
-  // The MDU's funct3 and W64 go out on their own nets, as MemFunct3M does: slot 0's Funct3E/M and W64E
-  // also feed the FPU's integer divide and conversions, which must keep seeing slot 0.
+  // The MDU's funct3, W64 and divide start go out on their own nets, as MemFunct3M does: slot 0's
+  // Funct3E/M, W64E and IntDivE also feed the FPU's integer divide and conversions, which must keep
+  // seeing slot 0.
   assign Mdu2E = MDUActive2E;
   flopenrc #(1) Mdu2MReg(clk, reset, FlushM, ~StallM, Mdu2E, Mdu2M);
   assign MDUActiveE = MDUActive0E | MDUActive2E;
   mux2 #(3) mdufunct3emux(Funct3E, Funct3_2E, Mdu2E, MDUFunct3E);
   mux2 #(3) mdufunct3mmux(Funct3M, Funct3_2M, Mdu2M, MDUFunct3M);
   mux2 #(1) mduw64emux(W64E, W64_2E, Mdu2E, MDUW64E);
+  mux2 #(1) mduintdivemux(IntDivE, IntDiv2E, Mdu2E, MDUIntDivE);
 
   // Memory hazards for the bundle.  The controller states both of these against slot 0's Execute stage,
   // which covers every case where slot 0 holds the memory operation.  Once slot 1 may hold it instead,
@@ -297,9 +302,11 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
                        ((Rs1D == Rd2E) | (Rs2D == Rd2E) |
                         (Issue2D & ((Rs1_2D == Rd2E) | (Rs2_2D == Rd2E))));
 
-  // Multiply-use, for the same reason: the product is not complete until the end of Memory, so it
-  // first appears in ResultW2, and IEUResult2M holds slot 1's meaningless ALU output.  This is the slot
-  // 1 counterpart of the controller's MDUStallD, which charges slot 0's multiplies the same cycle.
+  // Multiply/divide-use, for the same reason: the result is not complete until the end of Memory, so
+  // it first appears in ResultW2, and IEUResult2M holds slot 1's meaningless ALU output.  This is the
+  // slot 1 counterpart of the controller's MDUStallD, which charges slot 0's MDU operations the same
+  // cycle.  A divide's iterations happen while DivBusyE holds the whole pipeline, so from the
+  // consumer's point of view a divide is no later than a multiply once it leaves Execute.
   assign MDUStall2D = MDUActive2E & (Rd2E != 5'b0) &
                       ((Rs1D == Rd2E) | (Rs2D == Rd2E) |
                        (Issue2D & ((Rs1_2D == Rd2E) | (Rs2_2D == Rd2E))));

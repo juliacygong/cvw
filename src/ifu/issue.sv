@@ -15,10 +15,10 @@
 //
 //          Slot 1 is restricted by the hardware it has, not by legality.  It may hold anything its
 //          own ALU can finish in one cycle -- including the Zb*/Zk*/Zicond encodings, since its
-//          controller has its own bitmanip decoder -- plus one load and one multiply, because the
-//          single load/store unit and the single multiplier can each be steered to either slot.  It
-//          may not hold a divide, a CSR access, or a control transfer.  Stores are excluded for a
-//          reason that is about replay rather than hardware; see the LOAD arm below.
+//          controller has its own bitmanip decoder -- plus one load and one multiply or divide,
+//          because the single load/store unit and the single multiply/divide unit can each be
+//          steered to either slot.  It may not hold a CSR access or a control transfer.  Stores are
+//          excluded for a reason that is about replay rather than hardware; see the LOAD arm below.
 //
 //          Legality is left to the decoder that already knows it.  Where slot 1 turns out to hold an
 //          instruction this configuration does not implement, or one whose memory access faults, the
@@ -74,11 +74,14 @@ module issue import cvw::*;  #(parameter cvw_t P) (
   logic [4:0] Rd1F, Rs1_1F, Rs2_1F;          // Slot 1's register fields, whatever its length
   logic       Recognized0F, Recognized1F;    // instrfields decoded this slot's fields
   logic [1:0] MemRW0F, MemRW1F;              // ... and whether it uses the load/store unit
-  logic       IsBranch1F;                    // ... and whether slot 1 is a conditional branch
+  logic       IsBranch0F, IsBranch1F;        // ... and whether each slot is a conditional branch
   logic       BothRecognizedF, Slot0CanPairF, Slot1CanPairF, NoDependencyF;
   logic       Slot0IsMemF, Slot1IsMemF, OneMemOpF;
   logic       MExtF;                      // Slot 1 is a multiply/divide, which needs the one MDU
   logic       MulF;                       // ... and specifically a multiply, which the MDU can take from slot 1
+  logic       DivF;                       // ... or a divide, which it can take when the divider is the MDU's
+  logic       MduOKF;                     // Slot 1's multiply or divide may pair
+  logic       Slot0ReadsFPF;              // Slot 0 reads floating-point registers
   logic       Slot0IsMduF, Slot1IsMduF, OneMduOpF;
 
   assign Op0F      = Instr0F[6:0];
@@ -92,7 +95,7 @@ module issue import cvw::*;  #(parameter cvw_t P) (
   // Slot 0's sources are not connected: only what it writes can create a hazard with slot 1.  A
   // write-after-read cannot arise, because slot 0 read its operands in Decode and slot 1 does not
   // write until Writeback, and the two move together through the pipeline.
-  instrfields #(P) fields0(.Instr(Instr0F), .Rd(Rd0F), .Rs1(), .Rs2(), .MemRW(MemRW0F), .IsBranch(), .Recognized(Recognized0F));
+  instrfields #(P) fields0(.Instr(Instr0F), .Rd(Rd0F), .Rs1(), .Rs2(), .MemRW(MemRW0F), .IsBranch(IsBranch0F), .Recognized(Recognized0F));
   instrfields #(P) fields1(.Instr(Instr1F), .Rd(Rd1F), .Rs1(Rs1_1F), .Rs2(Rs2_1F), .MemRW(MemRW1F), .IsBranch(IsBranch1F), .Recognized(Recognized1F));
 
   // A slot is admitted only if its register fields are known.  For a 32-bit instruction that is
@@ -128,22 +131,42 @@ module issue import cvw::*;  #(parameter cvw_t P) (
   // as an unpaired instruction (see Replay2M).  That keeps the one copy of the encoding table in the
   // decoder that owns it, rather than a second copy here that could silently disagree with it.
   //
-  // So the whole of what Fetch must refuse is an instruction needing a unit slot 1 does not have:
-  //   div, divu, rem, remu  (and the RV64 W forms)
-  // These share the OP and OP-32 opcodes with the ALU instructions but need the divider, and the
-  // decoder calls them perfectly legal -- so nothing downstream would catch them.  OP-IMM needs no
-  // such check: the M extension has no OP-IMM encoding, and bits 31:25 of an addi are immediate bits
-  // that may hold any value.
+  // Multiplies and divides share the OP and OP-32 opcodes with the ALU instructions but need the one
+  // multiply/divide unit, and the decoder calls them perfectly legal -- so nothing downstream would
+  // catch one that slot 1 could not execute.  ieu.sv steers the MDU's operands, funct3, W64 and
+  // divide start to whichever slot holds the bundle's MDU operation, and slot 1's writeback takes its
+  // result -- the same arrangement as the one load/store unit.  OP-IMM needs no such check: the M
+  // extension has no OP-IMM encoding, and bits 31:25 of an addi are immediate bits that may hold any
+  // value.
   //
-  // Multiplies (mul, mulh, mulhsu, mulhu, and mulw on RV64) may pair.  The core still has one
-  // multiplier, but ieu.sv steers its operands and funct3 to whichever slot holds the bundle's
-  // multiply, and slot 1's writeback takes its result -- the same arrangement as the one load/store
-  // unit.  The multiplier has no enable and no side effect, so a slot 1 multiply that is later killed
-  // or replayed costs nothing: its register write is stopped by the commit gate like any slot 1 ALU
-  // operation.  RV64 OP-32 with funct7 = 0000001 is mulw only at funct3 000; the other multiply
-  // funct3 values are reserved there and stay out.
-  assign MExtF = (Funct7_1F == 7'b0000001);
-  assign MulF  = P.ZMMUL_SUPPORTED & MExtF & ~Funct3_1F[2];
+  // Multiplies (mul, mulh, mulhsu, mulhu, and mulw on RV64) may always pair.  The multiplier has no
+  // enable and no side effect, so a slot 1 multiply that is later killed or replayed costs nothing:
+  // its register write is stopped by the commit gate like any slot 1 ALU operation.  RV64 OP-32 with
+  // funct7 = 0000001 is mulw only at funct3 000; the other multiply funct3 values are reserved there.
+  //
+  // Divides (div, divu, rem, remu, and the RV64 W forms) may pair when the divider is the MDU's own --
+  // the same condition under which mdu.sv builds one.  With IDIV_ON_FPU the FPU divides instead, from
+  // slot 0's operands, so slot 1 divides stay out there.  And not beside a conditional branch in slot
+  // 0: unlike the multiplier, the divider acts as soon as it starts, taking DivBusyE high and holding
+  // the pipeline for the whole divide.  A branch that resolved taken in the same cycle would have
+  // started a divide for the fall-through, which must not execute, and hazard.sv deliberately keeps a
+  // busy divider from being flushed by a misprediction.  Refusing the pair keeps the divider from ever
+  // starting on a slot 1 that can be killed: the other way slot 1 is killed is a jump, which never
+  // pairs, and a slot 0 predicted taken does not pair either.
+  //
+  // Nor beside a slot 0 that reads floating-point registers.  The divide holds the Execute stage for
+  // its whole iteration while Memory and Writeback drain, so slot 0 sits there with operands whose
+  // forwarding sources retire under it.  datapath.sv's operand capture keeps the integer operands
+  // right through such a stall, but the FPU's Execute registers have no equivalent, so a slot 0 FP
+  // store, FP arithmetic or fused multiply-add stays out.  Compressed FP loads and stores are not
+  // recognized by instrfields, so only 32-bit encodings need checking.
+  assign MExtF  = (Funct7_1F == 7'b0000001);
+  assign MulF   = P.ZMMUL_SUPPORTED & MExtF & ~Funct3_1F[2];
+  assign DivF   = P.M_SUPPORTED & ~(P.IDIV_ON_FPU & P.F_SUPPORTED) & MExtF & Funct3_1F[2];
+  assign Slot0ReadsFPF = (&Instr0F[1:0]) &
+                         ((Op0F == 7'b0100111) | (Op0F == 7'b1010011) |       // FP store, FP arithmetic
+                          (Op0F[6:4] == 3'b100) & (Op0F[1:0] == 2'b11));      // fmadd, fmsub, fnmsub, fnmadd
+  assign MduOKF = MulF | (DivF & ~IsBranch0F & ~Slot0ReadsFPF);
 
   always_comb
     // A compressed slot 1 cannot go through the opcode whitelist below -- Instr1F[6:0] is not an
@@ -158,9 +181,10 @@ module issue import cvw::*;  #(parameter cvw_t P) (
     else case (Op1F)
       LUI, AUIPC: Slot1CanPairF = 1'b1;
       OP_IMM:     Slot1CanPairF = 1'b1;
-      OP:         Slot1CanPairF = ~MExtF | MulF;
+      OP:         Slot1CanPairF = ~MExtF | MduOKF;
       OP_IMM_32:  Slot1CanPairF = (P.XLEN == 64);
-      OP_32:      Slot1CanPairF = (P.XLEN == 64) & (~MExtF | (MulF & (Funct3_1F == 3'b000)));
+      // On OP-32, funct3 001-011 with funct7 = 0000001 is reserved; mulw and the four W divides are not
+      OP_32:      Slot1CanPairF = (P.XLEN == 64) & (~MExtF | (MduOKF & ((Funct3_1F == 3'b000) | Funct3_1F[2])));
       // A load may pair; a store may not, and the reason is replay rather than the load/store unit,
       // which handles either slot equally well.  A faulting store must leave memory untouched, and the
       // only thing that cancels a write in this design is FlushW, which a trap supplies.  A replay
