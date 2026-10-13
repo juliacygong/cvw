@@ -830,7 +830,10 @@ module testbench;
     integer AnyCompressed = 0;              // ... compressed was A blocker, not necessarily the only one
     integer AnyDep = 0;                     // ... likewise for the dependency check
     integer BlockJump1 = 0;                 // ... solely because slot 1 was a jal/jalr (out of scope: the RAS)
-    integer BlockMDU1 = 0;                  // ... solely because slot 1 was a multiply or divide (one MDU)
+    integer BlockMDU1 = 0;                  // ... solely because slot 1 was a divide (slot 1 has no divider)
+    integer BlockOneMdu = 0;                // ... solely because both slots wanted the multiply/divide unit
+    integer Mul2 = 0;                       // slot 1 multiplies that committed
+    integer MulUse2 = 0;                    // cycles stalled because a slot 1 multiply's product was not ready
     integer BlockUnrec0 = 0;                // ... solely because SLOT 0's encoding is not in instrfields
     integer BlockUnrec1 = 0;                // ... solely because SLOT 1's is
     logic Cfi1F, Br1F, Jmp1F, Refused;
@@ -859,28 +862,28 @@ module testbench;
           PairOpportunity <= PairOpportunity + 1;
           if (~dut.core.ifu.issue.Slot1CanPairF & Cfi1F
               & dut.core.ifu.issue.BothRecognizedF & dut.core.ifu.issue.Slot0CanPairF
-              & dut.core.ifu.issue.NoDependencyF    & dut.core.ifu.issue.OneMemOpF) begin
+              & dut.core.ifu.issue.NoDependencyF    & dut.core.ifu.issue.OneMemOpF & dut.core.ifu.issue.OneMduOpF) begin
             if (Br1F) begin
               BlockBranch1 <= BlockBranch1 + 1;
               if (~dut.core.ifu.PCF[2]) BlockBranch1Aligned <= BlockBranch1Aligned + 1;
             end else BlockJump1 <= BlockJump1 + 1;
           end
+          // A slot 1 divide is refused by ~MExtF inside Slot1CanPairF, so it needs its own attribution:
+          // it is not a branch, a jump, compressed, a dependency or a memory clash.  Multiplies pair, so
+          // since slot 1 multiplies were admitted this counts divides only.
           if (~dut.core.ifu.issue.Slot1CanPairF & dut.core.ifu.issue.MExtF & ~Cfi1F
               & dut.core.ifu.issue.BothRecognizedF & dut.core.ifu.issue.Slot0CanPairF
-              & dut.core.ifu.issue.NoDependencyF   & dut.core.ifu.issue.OneMemOpF)
+              & dut.core.ifu.issue.NoDependencyF   & dut.core.ifu.issue.OneMemOpF & dut.core.ifu.issue.OneMduOpF)
             BlockMDU1 <= BlockMDU1 + 1;
-          // A slot 1 multiply or divide is refused by ~MExtF inside Slot1CanPairF, so it needs its
-          // own attribution: it is not a branch, a jump, compressed, a dependency or a memory clash.
-          if (~dut.core.ifu.issue.Slot1CanPairF & dut.core.ifu.issue.MExtF & ~Cfi1F
+          if (~dut.core.ifu.issue.OneMduOpF
               & dut.core.ifu.issue.BothRecognizedF & dut.core.ifu.issue.Slot0CanPairF
-              & dut.core.ifu.issue.NoDependencyF   & dut.core.ifu.issue.OneMemOpF) begin
-            BlockMDU1 <= BlockMDU1 + 1;
-          end
+              & dut.core.ifu.issue.Slot1CanPairF     & dut.core.ifu.issue.NoDependencyF & dut.core.ifu.issue.OneMemOpF)
+            BlockOneMdu <= BlockOneMdu + 1;
           if (~dut.core.ifu.issue.BothRecognizedF) AnyCompressed <= AnyCompressed + 1;
           if (~dut.core.ifu.issue.NoDependencyF)      AnyDep        <= AnyDep + 1;
           if (~dut.core.ifu.issue.BothRecognizedF
               & dut.core.ifu.issue.Slot0CanPairF & dut.core.ifu.issue.Slot1CanPairF
-              & dut.core.ifu.issue.NoDependencyF & dut.core.ifu.issue.OneMemOpF) begin
+              & dut.core.ifu.issue.NoDependencyF & dut.core.ifu.issue.OneMemOpF & dut.core.ifu.issue.OneMduOpF) begin
             BlockCompressed <= BlockCompressed + 1;
             // Which slot's encoding instrfields failed to recognise.  A gap in slot 0 is pure
             // conservatism -- slot 0 executes everything it always did -- so it bounds what the
@@ -890,15 +893,15 @@ module testbench;
           end
           if (~dut.core.ifu.issue.NoDependencyF
               & dut.core.ifu.issue.BothRecognizedF & dut.core.ifu.issue.Slot0CanPairF
-              & dut.core.ifu.issue.Slot1CanPairF    & dut.core.ifu.issue.OneMemOpF)
+              & dut.core.ifu.issue.Slot1CanPairF    & dut.core.ifu.issue.OneMemOpF & dut.core.ifu.issue.OneMduOpF)
             BlockDep <= BlockDep + 1;
           if (~dut.core.ifu.issue.Slot0CanPairF
               & dut.core.ifu.issue.BothRecognizedF & dut.core.ifu.issue.Slot1CanPairF
-              & dut.core.ifu.issue.NoDependencyF     & dut.core.ifu.issue.OneMemOpF)
+              & dut.core.ifu.issue.NoDependencyF     & dut.core.ifu.issue.OneMemOpF & dut.core.ifu.issue.OneMduOpF)
             BlockSlot0 <= BlockSlot0 + 1;
           if (~dut.core.ifu.issue.OneMemOpF
               & dut.core.ifu.issue.BothRecognizedF & dut.core.ifu.issue.Slot0CanPairF
-              & dut.core.ifu.issue.Slot1CanPairF     & dut.core.ifu.issue.NoDependencyF)
+              & dut.core.ifu.issue.Slot1CanPairF     & dut.core.ifu.issue.NoDependencyF & dut.core.ifu.issue.OneMduOpF)
             BlockOneMem <= BlockOneMem + 1;
         end
         if (dut.core.ifu.BPWrongE)                             FlushMispredict <= FlushMispredict + 1;
@@ -906,6 +909,8 @@ module testbench;
         if (dut.core.Mem2M & ~dut.core.StallM)                  Mem2 <= Mem2 + 1;
         if (dut.core.Replay2M & ~dut.core.StallM)               Replays <= Replays + 1;
         if (dut.core.ieu.LoadStall2D       & ~dut.core.StallE)  LoadUse2    <= LoadUse2 + 1;
+        if (dut.core.ieu.MDUStall2D        & ~dut.core.StallE)  MulUse2     <= MulUse2 + 1;
+        if (dut.core.ieu.Mdu2M & dut.core.ifu.Issue2M & ~dut.core.StallM & ~dut.core.FlushM) Mul2 <= Mul2 + 1;
         if (dut.core.ieu.BundleStoreStallD & ~dut.core.StallE)  BundleStore <= BundleStore + 1;
         if (dut.core.Replay2M & ~dut.core.StallM & dut.core.ieu.MemRW2M[1]) Replay2Ld <= Replay2Ld + 1;
         if (dut.core.Replay2M & ~dut.core.StallM & dut.core.ieu.MemRW2M[0]) Replay2St <= Replay2St + 1;
@@ -929,10 +934,10 @@ module testbench;
         Committed <= Committed + 1 + ((dut.core.ifu.Issue2M & ~dut.core.Replay2M) ? 1 : 0);
 
     final begin
-      $display("overhead: %0d cycles | stall slot0=%0d slot1=%0d other=%0d | mispredict=%0d | slot1 kills=%0d | slot1 mem=%0d replays=%0d | hazards: loaduse2=%0d bundlestore=%0d | replay ld=%0d st=%0d | branch+slot1mem=%0d | replay store leaks=%0d (must be 0)",
-               Cycles, StallSlot0, StallSlot1, StallOther, FlushMispredict, Kills, Mem2, Replays, LoadUse2, BundleStore, Replay2Ld, Replay2St, BrWithMem2, ReplayStoreLeak);
-      $display("pairing refused: %0d opportunities | sole cause: branch in slot1=%0d (8B-aligned=%0d) jump in slot1=%0d mdu in slot1=%0d compressed=%0d dependency=%0d slot0=%0d onemem=%0d (unrec slot0=%0d slot1=%0d) | any-cause: compressed=%0d dependency=%0d",
-               PairOpportunity, BlockBranch1, BlockBranch1Aligned, BlockJump1, BlockMDU1, BlockCompressed, BlockDep, BlockSlot0, BlockOneMem, BlockUnrec0, BlockUnrec1, AnyCompressed, AnyDep);
+      $display("overhead: %0d cycles | stall slot0=%0d slot1=%0d other=%0d | mispredict=%0d | slot1 kills=%0d | slot1 mem=%0d replays=%0d | slot1 mul=%0d | hazards: loaduse2=%0d muluse2=%0d bundlestore=%0d | replay ld=%0d st=%0d | branch+slot1mem=%0d | replay store leaks=%0d (must be 0)",
+               Cycles, StallSlot0, StallSlot1, StallOther, FlushMispredict, Kills, Mem2, Replays, Mul2, LoadUse2, MulUse2, BundleStore, Replay2Ld, Replay2St, BrWithMem2, ReplayStoreLeak);
+      $display("pairing refused: %0d opportunities | sole cause: branch in slot1=%0d (8B-aligned=%0d) jump in slot1=%0d div in slot1=%0d compressed=%0d dependency=%0d slot0=%0d onemem=%0d onemdu=%0d (unrec slot0=%0d slot1=%0d) | any-cause: compressed=%0d dependency=%0d",
+               PairOpportunity, BlockBranch1, BlockBranch1Aligned, BlockJump1, BlockMDU1, BlockCompressed, BlockDep, BlockSlot0, BlockOneMem, BlockOneMdu, BlockUnrec0, BlockUnrec1, AnyCompressed, AnyDep);
       if (P.ZICSR_SUPPORTED)
         $display("minstret check: committed=%0d minstret=%0d %s", Committed,
                  dut.core.priv.priv.csr.counters.HPMCOUNTER_REGW[2],

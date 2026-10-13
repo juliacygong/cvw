@@ -87,7 +87,10 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   logic                          LoadStallD;
   logic                          StoreStallD;
   logic                          SquashSCW;
-  logic                          MDUActiveE;                      // Mul/Div instruction being executed
+  logic                          MDUActiveE;                      // Mul/Div instruction being executed, in either slot
+  logic [P.XLEN-1:0]             MDUSrcAE, MDUSrcBE;              // MDU operands, from the slot holding the bundle's MDU operation
+  logic [2:0]                    MDUFunct3E, MDUFunct3M;          // MDU operation, from that slot
+  logic                          MDUW64E;                         // MDU W-type, from that slot
   logic                          ENVCFG_ADUE;                     // HPTW A/D Update enable
   logic                          ENVCFG_PBMTE;                    // Page-based memory type enable
   logic [3:0]                    ENVCFG_CBE;                      // Cache Block operation enables
@@ -132,7 +135,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   logic                          LSUStallM;
 
   // cpu lsu interface
-  logic [2:0]                    Funct3M;                         // slot 0's funct3, to the MDU and FPU
+  logic [2:0]                    Funct3M;                         // slot 0's funct3, to the FPU
   logic [2:0]                    MemFunct3M;                      // the bundle's memory funct3, to the LSU
   logic [P.XLEN-1:0]             IEUAdrE;                         // slot 0's branch / jump target, to the IFU
   logic [P.XLEN-1:0]             LSUAdrE;                         // the bundle's memory address, to the LSU
@@ -211,6 +214,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
      // Execute Stage interface
      .PCE, .PCLinkE, .FWriteIntE, .FCvtIntE, .IEUAdrE, .LSUAdrE, .IntDivE, .W64E,
      .Funct3E, .ForwardedSrcAE, .ForwardedSrcBE, .MDUActiveE, .CMOpM, .IFUPrefetchE, .LSUPrefetchM,
+     .MDUSrcAE, .MDUSrcBE, .MDUFunct3E, .MDUFunct3M, .MDUW64E,
      // Memory stage interface
      .SquashSCW,  // from LSU
      .MemRWE,     // read/write control goes to LSU
@@ -353,9 +357,11 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
 
   // multiply/divide unit
   if (P.ZMMUL_SUPPORTED) begin : mdu
+    // The operands, funct3 and W64 come from whichever slot holds the bundle's MDU operation (see
+    // ieu.sv).  IntDivE stays slot 0's: issue.sv admits only multiplies to slot 1.
     mdu #(P) mdu(.clk, .reset, .StallM, .StallW, .FlushE, .FlushM, .FlushW,
-      .ForwardedSrcAE, .ForwardedSrcBE,
-      .Funct3E, .Funct3M, .IntDivE, .W64E, .MDUActiveE,
+      .ForwardedSrcAE(MDUSrcAE), .ForwardedSrcBE(MDUSrcBE),
+      .Funct3E(MDUFunct3E), .Funct3M(MDUFunct3M), .IntDivE, .W64E(MDUW64E), .MDUActiveE,
       .MDUResultW, .DivBusyE);
   end else begin // no M instructions supported
     assign MDUResultW = '0;

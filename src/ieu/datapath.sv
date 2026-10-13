@@ -54,6 +54,8 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   input  logic [4:0]        Rd2W,                    // Slot 1: destination register in Writeback
   input  logic              Mem2E,                   // Slot 1: holds the bundle's memory operation
   input  logic [2:0]        ResultSrc2W,             // Slot 1: selects source of its writeback value
+  input  logic              Mdu2E,                   // Slot 1: holds the bundle's multiply
+  output logic [P.XLEN-1:0] MDUSrcAE, MDUSrcBE,      // Operands to the MDU, from whichever slot holds its operation
   // Execute stage signals
   input  logic [P.XLEN-1:0] PCE,                     // PC in Execute stage
   input  logic [P.XLEN-1:0] PCLinkE,                 // PC + 4 (of instruction in Execute stage)
@@ -187,12 +189,24 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   // redirect path exactly as it was.
   mux2  #(P.XLEN)  lsuadrmux(IEUAdrE, IEUAdr2E, Mem2E, LSUAdrE);
 
+  // The multiplier's operands, from whichever slot holds the bundle's one MDU operation.  These are
+  // the forwarded register values, as slot 0's ForwardedSrcAE/BE always were.  They are separate
+  // outputs rather than a mux on ForwardedSrcAE/BE because the FPU reads those too, for slot 0.
+  mux2  #(P.XLEN)  mdusrcamux(ForwardedSrcAE, ForwardedSrc2AE, Mdu2E, MDUSrcAE);
+  mux2  #(P.XLEN)  mdusrcbmux(ForwardedSrcBE, ForwardedSrc2BE, Mdu2E, MDUSrcBE);
+
   // Slot 1 Memory and Writeback.  Slot 0 needs a mux5 in Writeback to choose between the ALU, a load,
-  // a CSR read, the multiply/divide unit and a store-conditional.  Slot 1 can only be an ALU operation
-  // or a load, so it needs just two of those, selected by the same ResultSrc encoding slot 0 uses.
+  // a CSR read, the multiply/divide unit and a store-conditional.  Slot 1 can only be an ALU operation,
+  // a load or a multiply, so it needs just three of those, selected by the same ResultSrc encoding
+  // slot 0 uses.  A slot 1 multiply's product is always the MDU's: the FPU only ever does divides.
   flopenrc #(P.XLEN) IEUResult2MReg(clk, reset, FlushM, ~StallM, IEUResult2E, IEUResult2M);
   flopenrc #(P.XLEN) IEUResult2WReg(clk, reset, FlushW, ~StallW, IEUResult2M, IEUResult2W);
-  mux2  #(P.XLEN)  resultmux2W(IEUResult2W, ReadDataW, ResultSrc2W == 3'b001, ResultW2);
+  always_comb
+    case (ResultSrc2W)
+      3'b001:  ResultW2 = ReadDataW;
+      3'b011:  ResultW2 = MDUResultW;
+      default: ResultW2 = IEUResult2W;
+    endcase
 
   // Memory stage pipeline register
   flopenrc #(P.XLEN) SrcAMReg(clk, reset, FlushM, ~StallM, SrcAE, SrcAM);
