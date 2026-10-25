@@ -414,8 +414,10 @@ module wallyTracer import cvw::*; #(parameter cvw_t P) (rvviTrace rvvi);
   // count the number of valid instructions to provide ordering to RVVI tracer
   // Two instructions can retire in one cycle, so order advances by one or two.  Slot 0 keeps the
   // lower number: within a bundle slot 1 is the later instruction in program order.
+  // Start at 1: ImperasDV's trace2api uses order 0 as "no event yet" when sorting a cycle's
+  // retirements, so a dual-issued first bundle numbered 0/1 drops slot 0 and reports a mismatch.
   always @(posedge clk)
-    if (reset) order <= 0;
+    if (reset) order <= 1;
     else if (valid) order <= order + (valid2 ? 64'd2 : 64'd1);
 
   assign valid  = ((InstrValidW | TrapW) & ~StallW) & ~reset;
