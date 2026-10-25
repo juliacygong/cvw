@@ -23,3 +23,6 @@ date,githash,branch,dirty,note,config,xlen,tech,freq_mhz,maxopt,coremark_ticks,m
 2026-10-11 19:22,50b66f11a,superscalar_wally_decode,yes,compressed CL/CS loads+sp forms in slot 1,rv32gc,32,sky130,10000,0,1917177,2030146,5.21,2273433,477685,26.6,2466139,,,,,,
 2026-10-11 19:28,50b66f11a,superscalar_wally_decode,yes,compressed CA/CB-arith in slot 1,rv32gc,32,sky130,10000,0,1890181,2030146,5.29,2273484,505007,28.56,2438803,,,,,,
 2026-10-12 00:08,50b66f11a,superscalar_wally_decode,yes,compressed branches + c.lui/c.addi16sp recognised for slot 0,rv32gc,32,sky130,10000,0,1850783,2030146,5.4,2301723,647602,39.15,2399134,,,,,,
+2026-10-12 00:22,50b66f11a,superscalar_wally_decode,yes,"compressed pairing complete (CI/CR, CL/CS, CA/CB, branches+lui in slot 0)",rv32gc,32,sky130,10000,0,1850783,2030146,5.4,2301723,647602,39.15,2399134,2510930.355308,8.572584,116.7,15.859,ifu,ifu=8.57 ieu=8.57 lsu=8.57 Stall=8.36 mdu=8.36 hzu=8.36
+2026-10-25 15:25,c15e515af,superscalar_muldiv,no,superscalar_muldiv: Julia mul/div in slot 1 + upstream merge,rv32gc,32,sky130,10000,0,1814592,2030146,5.51,2303743,671090,41.1,2366808,,,,,,
+2026-10-25 16:09,c15e515af,superscalar_muldiv,yes,fix: killed slot 1 forwarded by c2 (FlushM | PCSrcE),rv32gc,32,sky130,10000,0,1816466,2030156,5.5,2301483,639106,38.45,2369689,,,,,,

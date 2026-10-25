@@ -217,7 +217,12 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
     // instructions in slot 0.  CMOpM and FlushDCacheM stay open because cbo.* and fence.i are
     // MISC_MEM, which slot 1's whitelist never admits, so they are constant zero here.  And
     // LSUPrefetchM, like MemRWE, is a dead input on the LSU: declared, never read.
-    .StallM, .FlushM, .MemRWE(MemRW2E), .MemRWM(MemRW2MRaw), .CSRReadM(), .CSRWriteM(), .PrivilegedM(), .AtomicM(), .Funct3M(Funct3_2M),
+    // A slot 1 killed in Execute by a taken branch in slot 0 is flushed on its way into Memory, for the
+    // same reason.  Gating RegWrite2M/W below is not enough on its own: c2's forwarding logic reads its
+    // own RegWriteM/W, so a dead slot 1 would still forward its result to the next bundle's slot 1.
+    // A correctly predicted taken branch puts its target in Execute the very next cycle, so this
+    // happens whenever slot 1 of the target bundle reads the fall-through's destination.
+    .StallM, .FlushM(FlushM | PCSrcE), .MemRWE(MemRW2E), .MemRWM(MemRW2MRaw), .CSRReadM(), .CSRWriteM(), .PrivilegedM(), .AtomicM(), .Funct3M(Funct3_2M),
     .FlushDCacheM(), .InstrValidM(), .InstrValidE(), .InstrValidD(InstrValid2D), .FWriteIntM(),
     .IllegalBaseInstrM(IllegalBaseInstr2MRaw),
     .RegWriteM(RegWrite2MRaw), .RegWriteOtherM(RegWriteM),    // lane 2 forwards from lane 1
@@ -226,11 +231,10 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
     .RdW(Rd2W), .RdE(Rd2E), .RdM(Rd2M), .RdOtherM(RdM), .RdOtherW(RdW));
 
   // Slot 1 can be abandoned in Execute, after its controller's Execute register has already loaded --
-  // when slot 0 turns out to be a taken branch and slot 1 was the fall-through.  c2's own flush
-  // cannot catch that (it only covers slots that never issued), so qualify its register-write
-  // signals with Issue2M/Issue2W here.  This is the single point that matters: these feed both the
-  // second write port and lane 1's forwarding network, so a killed slot 1 neither writes nor is
-  // bypassed.
+  // when slot 0 turns out to be a taken branch and slot 1 was the fall-through.  c2's FlushM above
+  // clears that case, and Issue2W adds the Memory-stage replay, so qualify the register-write signals
+  // with Issue2M/Issue2W here: these feed both the second write port and lane 1's forwarding network,
+  // so an abandoned slot 1 neither writes nor is bypassed.
   assign RegWrite2M = RegWrite2MRaw & Issue2M;
   assign RegWrite2W = RegWrite2WRaw & Issue2W;
 
