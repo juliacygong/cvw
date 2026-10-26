@@ -44,8 +44,7 @@ module regfile #(parameter XLEN, E_SUPPORTED) (
 
   // Six ported register file for dual issue
   // Read four ports combinationally: slot 0 (a1/rd1, a2/rd2) and slot 1 (a4/rd4, a5/rd5)
-  // Write two ports (a3/wd3/we3 for slot 0, a6/wd6/we6 for slot 1)
-  // Write occurs on falling edge of clock
+  // Write two ports on falling edge of clock (a3/wd3/we3 for slot 0, a6/wd6/we6 for slot 1)
   // Register 0 hardwired to 0
 
   // reset is intended for simulation only, not synthesis
@@ -55,7 +54,7 @@ module regfile #(parameter XLEN, E_SUPPORTED) (
   // ports target the same register.  The issue logic refuses to pair instructions with the same
   // destination, so that case should not arise; the ordering is explicit rather than implied.
   always_ff @(negedge clk)
-    if (reset) for(i=1; i<NUMREGS; i++) rf[i] <= '0;
+    if (reset) for (i=1; i<NUMREGS; i++) rf[i] <= '0;
     else begin
       if (we3) rf[a3] <= wd3;
       if (we6) rf[a6] <= wd6;

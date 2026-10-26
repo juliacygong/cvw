@@ -37,23 +37,22 @@ module fregfile #(parameter FLEN) (
   output logic [FLEN-1:0]  rd5, rd6, rd7    // read data for the second instruction slot
 );
 
-   logic [FLEN-1:0] rf[31:0];
-   integer i;
+  logic [FLEN-1:0] rf[31:0];
+  integer i;
 
-   // three ported register file
-   // read three ports combinationally (A1/RD1, A2/RD2, A3/RD3)
-   // write fourth port on rising edge of clock (A4/WD4/WE4)
-   // write occurs on falling edge of clock
+  // four-ported register file
+  // read three ports combinationally (A1/RD1, A2/RD2, A3/RD3)
+  // write fourth port on falling edge of clock (A4/WD4/WE4)
 
-   always_ff @(negedge clk) // or posedge reset)
-     if (reset) for(i=0; i<32; i++) rf[i] <= '0;
-     else if (we4) rf[a4] <= wd4;
+  always_ff @(negedge clk)
+    if (reset) for (i = 0; i < 32; i++) rf[i] <= '0;
+    else if (we4) rf[a4] <= wd4;
 
-   assign rd1 = rf[a1];
-   assign rd2 = rf[a2];
-   assign rd3 = rf[a3];
-   assign rd5 = rf[a5];
-   assign rd6 = rf[a6];
-   assign rd7 = rf[a7];
+  assign rd1 = rf[a1];
+  assign rd2 = rf[a2];
+  assign rd3 = rf[a3];
+  assign rd5 = rf[a5];
+  assign rd6 = rf[a6];
+  assign rd7 = rf[a7];
 
-endmodule // regfile
+endmodule // fregfile

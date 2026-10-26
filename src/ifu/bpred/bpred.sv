@@ -27,21 +27,20 @@
 // and limitations under the License.
 ////////////////////////////////////////////////////////////////////////////////////////////////
 
-`define INSTR_CLASS_PRED 1
 `include "BranchPredictorType.vh"
 
 
 module bpred import cvw::*;  #(parameter cvw_t P) (
-  input  logic             clk, reset,
-  input  logic             StallF, StallD, StallE, StallM, StallW,
-  input  logic             FlushD, FlushE, FlushM, FlushW,
+  input  logic              clk, reset,
+  input  logic              StallF, StallD, StallE, StallM, StallW,
+  input  logic              FlushD, FlushE, FlushM, FlushW,
   // Fetch stage
   // the prediction
-  input  logic [31:0]      InstrD,                    // Decompressed decode stage instruction. Used to decode instruction class
+  input  logic [31:0]       InstrD,                    // Decompressed decode stage instruction. Used to decode instruction class
   input  logic [P.XLEN-1:0] PCNextF,                   // Next Fetch Address
-  input  logic [P.XLEN-1:0] PCNextSeqF,               // Sequential next PC: after slot 0, or after both slots when they issue together
-  output logic [P.XLEN-1:0] PC1NextF,                  // Branch Predictor predicted or corrected fetch address on miss prediction
-  output logic             BPPCSrcF,                  // Predicted taken, so the next PC is the predicted target rather than sequential
+  input  logic [P.XLEN-1:0] PCNextSeqF,                // Sequential next PC: after slot 0, or after both slots when they issue together
+  output logic [P.XLEN-1:0] PC1NextF,                  // Branch Predictor predicted or corrected fetch address on misprediction
+  output logic              BPPCSrcF,                  // Predicted taken, so the next PC is the predicted target rather than sequential
   output logic [P.XLEN-1:0] NextValidPCE,              // Address of next valid instruction after the instruction in the Memory stage
 
   // Update Predictor
@@ -50,28 +49,28 @@ module bpred import cvw::*;  #(parameter cvw_t P) (
   input  logic [P.XLEN-1:0] PCE,                       // Execution stage instruction address
   input  logic [P.XLEN-1:0] PCM,                       // Memory stage instruction address
 
-  input  logic [31:0]      PostSpillInstrRawF,        // Instruction
+  input  logic [31:0]       PostSpillInstrRawF,        // Instruction
 
   // Branch and jump outcome
-  input  logic             InstrValidD, InstrValidE,
-  input  logic             Commit2E,                 // Slot 1 will commit alongside slot 0, so the bundle is two instructions long
-  input  logic             Compressed2E,             // ... and slot 1 is 16 bits, so the bundle ends 2 bytes after it rather than 4
-  input  logic             BranchD, BranchE,
-  input  logic             JumpD, JumpE,
-  input  logic             PCSrcE,                    // Execution stage branch is taken
+  input  logic              InstrValidD, InstrValidE,
+  input  logic              Commit2E,                  // Slot 1 will commit alongside slot 0, so the bundle is two instructions long
+  input  logic              Compressed2E,              // ... and slot 1 is 16 bits, so the bundle ends 2 bytes after it rather than 4
+  input  logic              BranchD, BranchE,
+  input  logic              JumpD, JumpE,
+  input  logic              PCSrcE,                    // Execution stage branch is taken
   input  logic [P.XLEN-1:0] IEUAdrE,                   // The branch/jump target address
   input  logic [P.XLEN-1:0] IEUAdrM,                   // The branch/jump target address
   input  logic [P.XLEN-1:0] PCLinkE,                   // The address following the branch instruction. (AKA Fall through address)
-  output logic [3:0]       IClassM,               // The valid instruction class. 1-hot encoded as call, return, jr (not return), j, br
+  output logic [3:0]        IClassM,                   // The valid instruction class. 1-hot encoded as {call, return, jump, branch}
 
   // Report branch prediction status
-  output logic             BPWrongE,                  // Prediction is wrong
-  output logic             BPWrongM,                  // Prediction is wrong
-  output logic             BPDirWrongM,           // Prediction direction is wrong
-  output logic             BTAWrongM,                 // Prediction target wrong
-  output logic             RASPredPCWrongM,           // RAS prediction is wrong
-  output logic             IClassWrongM               // Class prediction is wrong
-  );
+  output logic              BPWrongE,                  // Prediction is wrong
+  output logic              BPWrongM,                  // Prediction is wrong
+  output logic              BPDirWrongM,               // Prediction direction is wrong
+  output logic              BTAWrongM,                 // Prediction target wrong
+  output logic              RASPredPCWrongM,           // RAS prediction is wrong
+  output logic              IClassWrongM               // Class prediction is wrong
+);
 
   logic [1:0]              BPDirF;
 
@@ -160,27 +159,27 @@ module bpred import cvw::*;  #(parameter cvw_t P) (
       .IClassM({CallM, ReturnM, JumpM, BranchM}),
       .IClassW({CallW, ReturnW, JumpW, BranchW}));
 
-  icpred #(P, `INSTR_CLASS_PRED) icpred(.clk, .reset, .StallD, .StallE, .StallM, .StallW, .FlushD, .FlushE, .FlushM,
+  icpred #(P, P.INSTR_CLASS_PRED) icpred(.clk, .reset, .StallD, .StallE, .StallM, .StallW, .FlushD, .FlushE, .FlushM,
     .PostSpillInstrRawF, .InstrD, .BranchD, .BranchE, .JumpD, .JumpE, .BranchM, .BranchW, .JumpM, .JumpW,
     .CallD, .CallE, .CallM, .CallW, .ReturnD, .ReturnE, .ReturnM, .ReturnW, .BTBCallF, .BTBReturnF, .BTBJumpF,
-    .BTBBranchF, .BPCallF, .BPReturnF, .BPJumpF, .BPBranchF, .IClassWrongM, .BPReturnWrongD);
+    .BTBBranchF, .BPCallF, .BPReturnF, .BPJumpF, .BPBranchF, .IClassWrongM, .BPReturnWrongD, .BPReturnD);
 
   // Part 3 RAS
   RASPredictor #(P) RASPredictor(.clk, .reset, .StallD, .StallE, .StallM, .FlushD, .FlushE, .FlushM,
     .BPReturnF, .ReturnD, .ReturnE, .CallE,
-    .BPReturnWrongD, .RASPCF, .PCLinkE);
+    .BPReturnWrongD, .BPReturnD, .RASPCF, .PCLinkE);
 
   // Check the prediction
   // if it is a CFI then check if the next instruction address (PCD) matches the branch's target or fallthrough address.
   // if the class prediction is wrong a regular instruction may have been predicted as a taken branch
   // this will result in PCD not being equal to the fall through address PCLinkE (PCE+4).
   // The next instruction is always valid as no other flush would occur at the same time as the branch and not
-  // also flush the branch.  This will change in a superscaler cpu.
+  // also flush the branch.  This will change in a superscalar cpu.
   // branch is wrong only if the PC does not match and both the Decode and Fetch stages have valid instructions.
   assign BPWrongE = (PCCorrectE != PCD) & InstrValidE & InstrValidD;
   flopenrc #(1) BPWrongMReg(clk, reset, FlushM, ~StallM, BPWrongE, BPWrongM);
 
-  // Output the predicted PC or corrected PC on miss-predict.
+  // Output the predicted PC or corrected PC on misprediction.
   assign BPPCSrcF = (BPBranchF & BPDirF[1]) | BPJumpF;
   mux2 #(P.XLEN) pcmuxbp(BPBTAF, RASPCF, BPReturnF, BPPCF);
   // Selects the BP or PC+2/4.
@@ -201,10 +200,10 @@ module bpred import cvw::*;  #(parameter cvw_t P) (
 
   // If the fence/csrw was predicted as a taken branch then we select PCF, rather than PCE.
   // Effectively this is PCM+4 or the non-existent PCLinkM
-  if(`INSTR_CLASS_PRED) mux2 #(P.XLEN) pcmuxBPWrongInvalidateFlush(PCE, PCF, BPWrongM, NextValidPCE);
-  else  assign NextValidPCE = PCE;
+  if (P.INSTR_CLASS_PRED) mux2 #(P.XLEN) pcmuxBPWrongInvalidateFlush(PCE, PCF, BPWrongM, NextValidPCE);
+  else assign NextValidPCE = PCE;
 
-  if(P.ZIHPM_SUPPORTED) begin
+  if (P.ZIHPM_SUPPORTED) begin
     logic [P.XLEN-1:0]       RASPCD, RASPCE;
     logic                    RASPredPCWrongE;
     // performance counters
@@ -215,7 +214,7 @@ module bpred import cvw::*;  #(parameter cvw_t P) (
 
     // Unfortunately we can't use PCD to infer the correctness of the BTB or RAS because the class prediction
     // could be wrong or the fall through address selected for branch predict not taken.
-    // By pipeline the BTB's PC and RAS address through the pipeline we can measure the accuracy of
+    // By pipelining the BTB's PC and RAS address through the pipeline we can measure the accuracy of
     // both without the above inaccuracies.
     assign RASPredPCWrongE = (RASPCE != IEUAdrE) & ReturnE & PCSrcE;
 
