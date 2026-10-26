@@ -43,7 +43,7 @@ module instrfields import cvw::*;  #(parameter cvw_t P) (
   output logic [4:0]  Rd,           // Register written, or x0 if none
   output logic [4:0]  Rs1, Rs2,     // Registers read, or x0 if none
   output logic [1:0]  MemRW,        // Uses the load/store unit: [1] reads, [0] writes
-  output logic        IsBranch,     // Conditional branch: may sit in slot 0, but not yet in slot 1
+  output logic        IsBranch,     // Conditional branch: at most one per bundle, in either slot
   output logic        Recognized    // The fields above are known to be correct for this encoding
 );
 
@@ -178,10 +178,9 @@ module instrfields import cvw::*;  #(parameter cvw_t P) (
               end
             endcase
           end
-          // Conditional branches.  These are recognized so that one in SLOT 0 can carry a partner,
-          // exactly as a 32-bit beq already does -- it writes nothing, and if it resolves taken
-          // Kill2E squashes slot 1.  issue.sv still keeps them out of slot 1, which needs a second
-          // comparator and a prediction for slot 1's PC.
+          // Conditional branches, in either slot, exactly as a 32-bit beq.  In slot 0 it writes
+          // nothing, and if it resolves taken Kill2E squashes slot 1; in slot 1 it resolves with
+          // slot 1's own comparator.
           5'b01_110, 5'b01_111: begin                             // c.beqz, c.bnez
             Rs1 = {2'b01, Instr[9:7]};
             IsBranch = 1'b1; Recognized = 1'b1;

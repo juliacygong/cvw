@@ -74,6 +74,10 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
   output logic              InstrValidD, InstrValidE, InstrValidM, // Instruction is valid
   output logic              BranchD, BranchE,
   output logic              JumpD, JumpE,
+  output logic              Branch2D, Branch2E,               // Slot 1 is a conditional branch (Branch2D before the issue decision)
+  output logic              PCSrc2E,                          // ... that resolved taken
+  output logic [P.XLEN-1:0] IEUAdr2E,                         // ... to this target
+  output logic [P.XLEN-1:0] IEUResult2M,                      // Slot 1's result in Memory: a slot 1 branch's target
   // Writeback stage signals
   input  logic [P.XLEN-1:0] FIntDivResultW,                   // Integer divide result from FPU (fdivsqrt)
   input  logic [P.XLEN-1:0] CSRReadValW,                      // CSR read value,
@@ -118,7 +122,7 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
   logic [2:0] ImmSrc2D;                                       // Slot 1 immediate format
   logic       IllegalBaseInstr2D;                             // Slot 1 is an illegal base instruction
   logic       IllegalBaseInstr2MRaw;                          // ... carried to Memory, before the commit gate
-  logic       Branch2D, Jump2D;                               // Slot 1 is a branch / jump
+  logic       Jump2D;                                         // Slot 1 is a jump
   logic       InstrValid2D;                                   // Slot 1 controller valid bit (not yet qualified by the IFU's Instr2ValidD)
   logic       StructuralStall0D;                              // Slot 0's own structural hazards
   logic [1:0] MemRW0D, MemRW0M;                               // Slot 0 memory read/write in Decode / Memory
@@ -145,6 +149,8 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
   logic [2:0] BALUControl2E;                                  // Slot 1 bit-manipulation ALU control
   logic       BMUActive2E;                                    // Slot 1 bit-manipulation instruction active
   logic [1:0] CZero2E;                                        // Slot 1 czero.* active
+  logic [1:0] Flags2E;                                        // Slot 1 comparison flags ({eq, lt})
+  logic       BranchSigned2E;                                 // Slot 1 branch compares signed
 
   // Slot 1 Memory/Writeback-stage signals.  The core has one load/store unit, so at most one slot of
   // a bundle may hold a memory operation; Mem2E/Mem2M say it is slot 1's and steer the LSU's inputs
@@ -205,11 +211,13 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
     // An unpaired slot 1 is flushed on its way into Execute rather than being allowed down the
     // pipeline and suppressed at each consumer.  Its control signals, RegWrite2M/W and Rd2M/W then
     // come out as zero on their own, so nothing downstream needs to know about pairing.
-    .StallE, .FlushE(FlushE | ~Issue2D), .FlagsE(2'b00), .FWriteIntE(1'b0),
-    .PCSrcE(), .ALUSrcAE(ALUSrcA2E), .ALUSrcBE(ALUSrcB2E), .ALUResultSrcE(ALUResultSrc2E), .ALUSelectE(ALUSelect2E),
+    // Branch2E and PCSrc2E therefore describe a slot 1 that issued.  Slot 0 is never a branch or a
+    // jump beside a slot 1 branch, so a slot 1 branch is never killed by slot 0.
+    .StallE, .FlushE(FlushE | ~Issue2D), .FlagsE(Flags2E), .FWriteIntE(1'b0),
+    .PCSrcE(PCSrc2E), .ALUSrcAE(ALUSrcA2E), .ALUSrcBE(ALUSrcB2E), .ALUResultSrcE(ALUResultSrc2E), .ALUSelectE(ALUSelect2E),
     .Funct3E(Funct3_2E), .Funct7E(Funct7_2E), .IntDivE(IntDiv2E), .W64E(W64_2E), .UW64E(UW64_2E), .SubArithE(SubArith2E),
-    .BranchD(Branch2D), .BranchE(), .JumpD(Jump2D), .JumpE(Jump2E),
-    .BranchSignedE(), .BSelectE(BSelect2E), .ZBBSelectE(ZBBSelect2E), .BALUControlE(BALUControl2E),
+    .BranchD(Branch2D), .BranchE(Branch2E), .JumpD(Jump2D), .JumpE(Jump2E),
+    .BranchSignedE(BranchSigned2E), .BSelectE(BSelect2E), .ZBBSelectE(ZBBSelect2E), .BALUControlE(BALUControl2E),
     .BMUActiveE(BMUActive2E), .CZeroE(CZero2E), .MDUActiveE(MDUActive2E),
     .FCvtIntE(1'b0), .ForwardAE(Forward2AE), .ForwardBE(Forward2BE), .CMOpM(), .IFUPrefetchE(), .LSUPrefetchM(),
     // Only the two signals the LSU reads per-lane are connected.  AtomicM, CSRReadM, CSRWriteM and
@@ -336,6 +344,7 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
     .ImmSrc2D, .Instr2D, .Rs1_2D, .Rs2_2D, .Rs2_2E, .Forward2AE, .Forward2BE,                       // slot 1
     .ALUSrcA2E, .ALUSrcB2E, .ALUResultSrc2E, .ALUSelect2E, .Funct3_2E, .Funct7_2E,                  // slot 1
     .W64_2E, .UW64_2E, .SubArith2E, .BSelect2E, .ZBBSelect2E, .BALUControl2E, .BMUActive2E, .CZero2E, // slot 1
+    .BranchSigned2E, .Flags2E, .IEUAdr2E, .IEUResult2M,                                             // slot 1 branch
     .RegWrite2W, .Rd2W,                                                                             // slot 1 write port
     .Mem2E, .ResultSrc2W,                                                                           // slot 1 memory steering
     .Mdu2E, .MDUSrcAE, .MDUSrcBE,                                                                   // slot 1 multiply steering

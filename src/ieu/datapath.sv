@@ -50,6 +50,10 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   input  logic [2:0]        BALUControl2E,           // Slot 1: bit-manipulation ALU control
   input  logic              BMUActive2E,             // Slot 1: bit-manipulation instruction active
   input  logic [1:0]        CZero2E,                 // Slot 1: czero.* active
+  input  logic              BranchSigned2E,          // Slot 1: branch comparison is signed
+  output logic [1:0]        Flags2E,                 // Slot 1: comparison flags ({eq, lt})
+  output logic [P.XLEN-1:0] IEUAdr2E,                // Slot 1: ALU sum, which is its branch target
+  output logic [P.XLEN-1:0] IEUResult2M,             // Slot 1: result in Memory; a branch target for a slot 1 branch
   input  logic              RegWrite2W,              // Slot 1: commits a register write this cycle
   input  logic [4:0]        Rd2W,                    // Slot 1: destination register in Writeback
   input  logic              Mem2E,                   // Slot 1: holds the bundle's memory operation
@@ -106,12 +110,11 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   logic [P.XLEN-1:0] R1_2E, R2_2E, ImmExt2E;         // Slot 1: the same, in Execute
   logic [P.XLEN-1:0] ForwardedSrc2AE, ForwardedSrc2BE; // Slot 1: operands after forwarding
   logic [P.XLEN-1:0] SrcA2E, SrcB2E;                 // Slot 1: ALU inputs
-  logic [P.XLEN-1:0] ALUResult2E, IEUAdr2E;          // Slot 1: ALU outputs.  The sum needs no bit-0 mask
-                                                     //   as slot 0's does, because slot 1 cannot jump.
+  logic [P.XLEN-1:0] ALUResult2E;                    // Slot 1: ALU output.  The sum, IEUAdr2E, needs no bit-0
+                                                     //   mask as slot 0's does, because slot 1 cannot jump.
   logic [P.XLEN-1:0] AltResult2E, IEUResult2E;       // Slot 1: result in Execute
-  logic [P.XLEN-1:0] IEUResult2M, IEUResult2W;       // Slot 1: result in Memory, and in Writeback
+  logic [P.XLEN-1:0] IEUResult2W;                    // Slot 1: result in Writeback
   logic [P.XLEN-1:0] ResultW2;                       // Slot 1: value written back
-  logic [1:0]        Flags2E;                        // Slot 1: comparator flags (unused until slot 1 may branch)
   // Execute stage signals
   logic [P.XLEN-1:0] R1E, R2E;                       // Source operands read from register file
   logic [P.XLEN-1:0] ImmExtE;                        // Extended immediate in Execute stage
@@ -171,8 +174,8 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   mux2  #(P.XLEN)  altresultmux(ImmExtE, PCLinkE, JumpE, AltResultE);
   mux2  #(P.XLEN)  ieuresultmux(ALUResultE, AltResultE, ALUResultSrcE, IEUResultE);
 
-  // Slot 1 (superscalar) Execute stage, mirroring slot 0 above.  Its result is computed but not
-  // committed yet, so slot 1 has no Memory-stage register and no branch/jump redirect.
+  // Slot 1 (superscalar) Execute stage, mirroring slot 0 above.  A conditional branch in slot 1
+  // compares with its own comparator, and its target is its ALU's sum of slot 1's PC and immediate.
   mux2  #(P.XLEN)  r1_2enextmux(R1_2D, ForwardedSrc2AE, CaptureE, R1_2ENext);   // operand capture, as for slot 0
   mux2  #(P.XLEN)  r2_2enextmux(R2_2D, ForwardedSrc2BE, CaptureE, R2_2ENext);
   flopenrc #(P.XLEN) RD1_2EReg(clk, reset, FlushE, ~StallE | CaptureE, R1_2ENext, R1_2E);
@@ -181,14 +184,15 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
 
   mux5  #(P.XLEN)  faemux2(R1_2E, ResultW2, IEUResult2M, ResultW, IFResultM, Forward2AE, ForwardedSrc2AE);
   mux5  #(P.XLEN)  fbemux2(R2_2E, ResultW2, IEUResult2M, ResultW, IFResultM, Forward2BE, ForwardedSrc2BE);
+  comparator #(P.XLEN) comp2(ForwardedSrc2AE, ForwardedSrc2BE, BranchSigned2E, Flags2E);
   // Slot 1 sits one instruction after slot 0, so its PC is PCLinkE (= PCE + 4, since the issue
   // rules require an uncompressed slot 0).  Using PCE here would make every paired auipc off by 4.
   mux2  #(P.XLEN)  srcamux2(ForwardedSrc2AE, PCLinkE, ALUSrcA2E, SrcA2E);
   mux2  #(P.XLEN)  srcbmux2(ForwardedSrc2BE, ImmExt2E, ALUSrcB2E, SrcB2E);
   alu   #(P)       alu2(SrcA2E, SrcB2E, W64_2E, UW64_2E, SubArith2E, ALUSelect2E, BSelect2E, ZBBSelect2E,
                         Funct3_2E, Funct7_2E, Rs2_2E, BALUControl2E, BMUActive2E, CZero2E, ALUResult2E, IEUAdr2E);
-  // Slot 0's altresultmux also selects PCLinkE as a jump's link value.  Slot 1 cannot jump under the
-  // issue rules, and its link value would be PCLinkE + 4 rather than PCLinkE, so that input is left
+  // Slot 0's altresultmux also selects PCLinkE as a jump's link value.  Slot 1 may branch but cannot
+  // jump under the issue rules, and its link value would be PCLinkE + 4 rather than PCLinkE, so that input is left
   // out rather than wired to a value that is wrong but currently unreachable.
   assign AltResult2E = ImmExt2E;                     // lui writes its immediate straight through
   mux2  #(P.XLEN)  ieuresultmux2(ALUResult2E, AltResult2E, ALUResultSrc2E, IEUResult2E);
