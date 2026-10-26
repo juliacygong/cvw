@@ -29,6 +29,7 @@
 
 module hazard (
   input  logic  BPWrongE, CSRWriteFenceM, Replay2M, RetM, TrapM,
+  input  logic  MemFault2M,            // slot 1's memory access faulted: its LSU stall is for a squashed access
   input  logic  StructuralStallD,
   input  logic  LSUStallM, IFUStallF,
   input  logic  FPUStallD, ExternalStall,
@@ -87,7 +88,9 @@ module hazard (
   // Need to gate IFUStallF when the equivalent FlushFCause = FlushDCause = 1.
   // assign StallWCause = ((IFUStallF & ~FlushDCause) | LSUStallM) & ~FlushWCause;
   // Because FlushWCause is a strict subset of FlushDCause, FlushWCause is factored out.
-  assign StallWCause = (IFUStallF & ~FlushDCause) | ((LSUStallM | WaitM) & ~FlushWCause) | ExternalStall;
+  // A slot 1 memory fault squashes its own access, so its LSU stall is ignored as a trap's is; only the
+  // LSU stall, because a fault here means slot 1 holds the bundle's one memory operation.
+  assign StallWCause = (IFUStallF & ~FlushDCause) | (((LSUStallM & ~MemFault2M) | WaitM) & ~FlushWCause) | ExternalStall;
 
   // Stall each stage for cause or if the next stage is stalled
   // coverage off: StallFCause is always 0

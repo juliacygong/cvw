@@ -76,6 +76,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   logic                          Illegal2M;                       // ... or slot 1 is an illegal instruction
   logic                          IllegalComp2M;                   // ... or an illegal compressed one, flagged by its decompressor
   logic                          Replay2M;                        // ... either way slot 1 must re-run alone
+  logic                          MemFault2M;                      // Slot 1's memory operation faulted (the memory half of Replay2M)
   logic                          InstrPageFaultF, LoadPageFaultM, StoreAmoPageFaultM;
   logic                          LoadMisalignedFaultM, LoadAccessFaultM;
   logic                          StoreAmoMisalignedFaultM, StoreAmoAccessFaultM;
@@ -235,7 +236,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
     .CSRReadM, .CSRWriteM, .PrivilegedM, .CSRWriteFenceM, .InvalidateICacheM);
 
   lsu #(P) lsu(
-    .clk, .reset, .StallM, .FlushM, .StallW, .FlushW,
+    .clk, .reset, .StallM, .FlushM, .StallW, .FlushW, .MemFault2M,
     // CPU interface
     .MemRWE, .MemRWM, .Funct3M(MemFunct3M), .Funct7M(InstrM[31:25]), .AtomicM,
     .CommittedM, .DCacheMiss, .DCacheAccess, .SquashSCW,
@@ -303,14 +304,18 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   // cancels a write here is FlushW, which a replay withholds so that slot 0 can still commit.  See the
   // LOAD arm of issue.sv for what admitting stores would require.  A replayed load needs nothing of
   // the sort -- it writes no memory, and Issue2W already stops its register write.
-  assign Replay2M = P.ZICSR_SUPPORTED &
-                    ((Mem2M & (LoadMisalignedFaultM | LoadAccessFaultM | LoadPageFaultM |
-                               StoreAmoMisalignedFaultM | StoreAmoAccessFaultM | StoreAmoPageFaultM))
-                     | Illegal2M | IllegalComp2M);
+  // MemFault2M is the memory half on its own.  The LSU squashes its own faulting access, but the D$ and
+  // bus still assert a stall for it every cycle it sits in Memory.  A trap is immune because the hazard
+  // unit ignores the LSU stall under FlushWCause; a replay deliberately does not flush Writeback, so the
+  // hazard unit must ignore the stall under MemFault2M instead or the replay never leaves Memory.
+  assign MemFault2M = P.ZICSR_SUPPORTED & Mem2M &
+                      (LoadMisalignedFaultM | LoadAccessFaultM | LoadPageFaultM |
+                       StoreAmoMisalignedFaultM | StoreAmoAccessFaultM | StoreAmoPageFaultM);
+  assign Replay2M = MemFault2M | (P.ZICSR_SUPPORTED & (Illegal2M | IllegalComp2M));
 
   // global stall and flush control
   hazard hzu(
-    .BPWrongE, .CSRWriteFenceM, .Replay2M, .RetM, .TrapM,
+    .BPWrongE, .CSRWriteFenceM, .Replay2M, .MemFault2M, .RetM, .TrapM,
     .StructuralStallD,
     .LSUStallM, .IFUStallF,
     .FPUStallD, .ExternalStall,
