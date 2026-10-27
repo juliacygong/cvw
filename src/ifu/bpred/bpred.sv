@@ -61,6 +61,8 @@ module bpred import cvw::*;  #(parameter cvw_t P) (
   input  logic [P.XLEN-1:0] IEUAdrE,                   // The branch/jump target address
   input  logic [P.XLEN-1:0] IEUAdrM,                   // The branch/jump target address
   input  logic [P.XLEN-1:0] PCLinkE,                   // The address following the branch instruction. (AKA Fall through address)
+  input  logic              LateBrM,                   // The branch in Memory was resolved there (ieu.sv late branch) ...
+  input  logic              LateBrTakenM,              // ... and this is its real direction; PCSrcE was only the assumed one
   output logic [3:0]        IClassM,                   // The valid instruction class. 1-hot encoded as {call, return, jump, branch}
 
   // Report branch prediction status
@@ -106,13 +108,13 @@ module bpred import cvw::*;  #(parameter cvw_t P) (
     gshare #(P, P.XLEN, P.BPRED_SIZE) DirPredictor(.clk, .reset, .StallF, .StallD, .StallE, .StallM, .StallW, .FlushD, .FlushE, .FlushM, .FlushW,
       .PCNextF, .PCF, .PCD, .PCE, .PCM, .BPDirF, .BPDirWrongE,
       .BPBranchF, .BranchD, .BranchE, .BranchM, .BranchW,
-      .PCSrcE);
+      .PCSrcE, .LateBrM, .LateBrTakenM);
 
   end else if (P.BPRED_TYPE == `BP_GLOBAL) begin : Predictor
     gshare #(P, P.XLEN, P.BPRED_SIZE, 0) DirPredictor(.clk, .reset, .StallF, .StallD, .StallE, .StallM, .StallW, .FlushD, .FlushE, .FlushM, .FlushW,
       .PCNextF, .PCF, .PCD, .PCE, .PCM, .BPDirF, .BPDirWrongE,
       .BPBranchF, .BranchD, .BranchE, .BranchM, .BranchW,
-      .PCSrcE);
+      .PCSrcE, .LateBrM, .LateBrTakenM);
 
   end else if (P.BPRED_TYPE == `BP_GSHARE_BASIC) begin : Predictor
     gsharebasic #(P, P.XLEN, P.BPRED_SIZE) DirPredictor(.clk, .reset, .StallF, .StallD, .StallE, .StallM, .StallW, .FlushD, .FlushE, .FlushM, .FlushW,

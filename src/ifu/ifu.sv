@@ -63,8 +63,13 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
   output logic [31:0]          InstrD,                                   // The decoded instruction in Decode stage
   output logic [31:0]          Instr2D,                                  // Second decoded instruction in Decode stage (superscalar slot 1)
   output logic                 Issue2D, Issue2E,                         // Slot 1 issues alongside slot 0 in Decode / Execute
+  output logic                 LateA2D, LateB2D,                         // Slot 1's rs1 / rs2 is slot 0's rd (late ALU bypass)
+  output logic                 LateOK2D,                                 // Slot 1 is an operation the late ALU implements
   output logic                 Issue2M, Issue2W,                         // ... and in Memory / Writeback, where it commits
   input  logic                 Replay2M,                                 // Slot 1's memory operation faulted; refetch it alone
+  output logic                 PredTakenE,                               // Fetch went to slot 0's predicted target
+  input  logic                 LateBrM, LateBrTakenM,                    // Slot 0's branch was checked in Memory, and its direction
+  input  logic                 LateBrWrongM,                             // ... which is not the way fetch went
   output logic                 IllegalComp2M,                            // Slot 1 is an illegal compressed instruction; replay it
   output logic [31:0]          InstrM,                                   // The decoded instruction in Memory stage
   output logic [31:0]          InstrOrigM,                               // Original compressed or uncompressed instruction in Memory stage for Illegal Instruction XTVAL
@@ -149,6 +154,10 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
   logic [P.XLEN-1:0]           Instr2PCD;                                // Slot 1 instruction address in the Decode stage
   logic                        Instr2ValidD;                             // Slot 1 in Decode holds a complete instruction
   logic                        Issue2F;                                  // Both slots may issue together
+  logic                        PredTakenD;                               // Fetch went to slot 0's predicted target
+  logic [P.XLEN-1:0]           RedirectSeqPCM;                           // Memory stage redirect, before a late branch's target
+  logic                        LateA2F, LateB2F;                         // ... and which of slot 1's operands are slot 0's result
+  logic                        LateOK2F;                                 // ... and whether slot 1 could run on the late ALU
   logic                        Kill2E;                                   // Slot 1 issued but must not commit
   logic                        Commit2E;                                 // Slot 1 issued and will commit
   logic                        BPPCSrcF;                                 // Branch predictor says this fetch is a taken branch or jump
@@ -400,7 +409,7 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
   // Decide in Fetch whether both slots may issue together.  This has to happen here rather than in
   // Decode because the PC advance below depends on it: a bundle of two advances the PC by both
   // lengths at once.  When Issue2F is low the core behaves exactly as single-issue Wally.
-  issue #(P) issue(.Instr0F(InstrRawF), .Instr1F(Instr2RawF), .Instr2ValidF, .BPPCSrcF, .Issue2F);
+  issue #(P) issue(.Instr0F(InstrRawF), .Instr1F(Instr2RawF), .Instr2ValidF, .BPPCSrcF, .Issue2F, .LateA2F, .LateB2F, .LateOK2F);
 
   assign IFUCacheBusStallF = ICacheStallF | BusStall;
   // The fetch side owns the stall for an unresolved ITLB miss / A update: the pipeline holds until the walker
@@ -417,19 +426,27 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
   flopenrc #(P.XLEN) Instr2PCDReg(clk, reset, FlushD, ~StallD, PCPlus2or4F, Instr2PCD);
   flopenrc #(1)      Instr2ValidDReg(clk, reset, FlushD, ~StallD, Instr2ValidF, Instr2ValidD);
   flopenrc #(1)      Issue2DReg(clk, reset, FlushD, ~StallD, Issue2F, Issue2D);
+  // Which way fetch went after slot 0: a late branch (ieu.sv) keeps that direction until Memory checks it.
+  flopenrc #(1)      PredTakenDReg(clk, reset, FlushD, ~StallD, BPPCSrcF, PredTakenD);
+  flopenrc #(1)      PredTakenEReg(clk, reset, FlushE, ~StallE, PredTakenD, PredTakenE);
+  flopenrc #(3)      Late2DReg(clk, reset, FlushD, ~StallD, {LateA2F, LateB2F, LateOK2F}, {LateA2D, LateB2D, LateOK2D});
 
   ////////////////////////////////////////////////////////////////////////////////////////////////
   // PCNextF logic
   ////////////////////////////////////////////////////////////////////////////////////////////////
 
-  // Both redirects here come from the Memory stage.  A replay sends fetch back to slot 1's own PC,
-  // which is PCM advanced by slot 0's length -- 2 when slot 0 was compressed, 4 otherwise.  The two
-  // selects cannot be high together: CSRWriteFenceM means slot 0 is a CSR write or a fence, and
-  // those are SYSTEM and MISC_MEM, which Slot0CanPairF refuses to pair -- so no priority is needed.
+  // All redirects here come from the Memory stage.  A replay sends fetch back to slot 1's own PC,
+  // which is PCM advanced by slot 0's length -- 2 when slot 0 was compressed, 4 otherwise.  A late
+  // branch (ieu.sv) found to go the other way goes to its target, or to that same address when it
+  // turned out not taken: fetch only assumed taken when slot 0 was predicted taken, which never pairs,
+  // so nothing issued beside it.  At most one select is high: CSRWriteFenceM means slot 0 is a CSR
+  // write or a fence, which neither pairs nor is a branch, and core.sv suppresses Replay2M under a
+  // late branch misprediction, since slot 1 was on the wrong path.
   if (P.ZICSR_SUPPORTED | P.ZIFENCEI_SUPPORTED) begin
-    mux2 #(P.XLEN) pcredirectmux(NextValidPCE, PCM + (CompressedM ? 'd2 : 'd4), Replay2M, RedirectPCM);
-    mux2 #(P.XLEN) pcmux2(.d0(PC1NextF), .d1(RedirectPCM), .s(CSRWriteFenceM | Replay2M), .y(PC2NextF));
-  end else assign PC2NextF = PC1NextF;
+    mux2 #(P.XLEN) pcredirectmux(NextValidPCE, PCM + (CompressedM ? 'd2 : 'd4), Replay2M | LateBrWrongM, RedirectSeqPCM);
+    mux2 #(P.XLEN) latebrtargetmux(RedirectSeqPCM, IEUAdrM, LateBrWrongM & LateBrTakenM, RedirectPCM);
+    mux2 #(P.XLEN) pcmux2(.d0(PC1NextF), .d1(RedirectPCM), .s(CSRWriteFenceM | Replay2M | LateBrWrongM), .y(PC2NextF));
+  end else assign PC2NextF = PC1NextF;   // ieu.sv makes no late branches without this path
 
   mux3 #(P.XLEN) pcmux3(PC2NextF, EPCM, TrapVectorM, {TrapM, RetM}, UnalignedPCNextF);
   mux2 #(P.XLEN) pcresetmux({UnalignedPCNextF[P.XLEN-1:1], 1'b0}, P.RESET_VECTOR[P.XLEN-1:0], reset, PCNextF);
@@ -468,7 +485,7 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
                 .BranchD, .BranchE, .JumpD, .JumpE,
                 .InstrD, .PCNextF, .PCNextSeqF, .PC1NextF, .BPPCSrcF, .PCE, .PCM, .PCSrcE, .IEUAdrE, .IEUAdrM, .PCF, .NextValidPCE,
                 .PCD, .PCLinkE, .IClassM, .BPWrongE, .PostSpillInstrRawF, .BPWrongM,
-                .BPDirWrongM, .BTAWrongM, .RASPredPCWrongM, .IClassWrongM);
+                .BPDirWrongM, .BTAWrongM, .RASPredPCWrongM, .IClassWrongM, .LateBrM, .LateBrTakenM);
 
   end else begin : bpred
     mux2 #(P.XLEN) pcmux1(.d0(PCNextSeqF), .d1(IEUAdrE), .s(PCSrcE), .y(PC1NextF));
@@ -559,7 +576,9 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
   // Replay2M is the Memory-stage equivalent of Kill2E: slot 1's memory operation faulted, so it is
   // abandoned here and refetched to run alone.  It cannot use FlushW, which would also discard slot 0.
   flopenrc #(1)     Issue2MReg(clk, reset, FlushM, ~StallM, Commit2E, Issue2M);
-  flopenrc #(1)     Issue2WReg(clk, reset, FlushW, ~StallW, Issue2M & ~Replay2M, Issue2W);
+  // A late branch found taken in Memory abandons the slot 1 beside it, the fall-through, as Kill2E
+  // does for a branch resolved in Execute.
+  flopenrc #(1)     Issue2WReg(clk, reset, FlushW, ~StallW, Issue2M & ~Replay2M & ~LateBrWrongM, Issue2W);
 
   // InstrM is only needed with CSRs or atomic operations
   if (P.ZICSR_SUPPORTED | P.ZAAMO_SUPPORTED | P.ZALRSC_SUPPORTED) begin

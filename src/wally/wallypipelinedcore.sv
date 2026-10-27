@@ -62,6 +62,11 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   logic [31:0]                   InstrD;
   logic [31:0]                   Instr2D;                                  // superscalar slot 1 instruction in Decode
   logic                          Issue2D, Issue2E, Issue2M, Issue2W;       // superscalar slot 1 issues alongside slot 0
+  logic                          LateA2D, LateB2D;                         // slot 1 operand is slot 0's result (late ALU)
+  logic                          LateOK2D;                                 // slot 1 could run on the late ALU
+  logic                          PredTakenE;                               // fetch went to slot 0's predicted target
+  logic                          LateBrM, LateBrTakenM, LateBrWrongM;      // slot 0 branch resolved in Memory
+  logic                          Replay2RawM;                              // slot 1 must re-run alone, unless it was on the wrong path
   logic [31:0]                   InstrM, InstrOrigM;
   logic [P.XLEN-1:0]             PCSpillF, PCE, PCLinkE;
   logic [P.XLEN-1:0]             PCM, PCSpillM;
@@ -198,7 +203,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
     .PCLinkE, .PCSrcE, .IEUAdrE, .IEUAdrM, .PCE, .BPWrongE, .BPWrongM,
     // Mem
     .CommittedF, .EPCM, .TrapVectorM, .RetM, .TrapM, .InvalidateICacheM, .CSRWriteFenceM,
-    .InstrD, .Instr2D, .Issue2D, .Issue2E, .Issue2M, .Issue2W, .Replay2M, .IllegalComp2M, .InstrM, .InstrOrigM, .PCM, .PCSpillM, .IClassM, .BPDirWrongM,
+    .InstrD, .Instr2D, .Issue2D, .Issue2E, .Issue2M, .Issue2W, .LateA2D, .LateB2D, .LateOK2D, .Replay2M, .PredTakenE, .LateBrM, .LateBrTakenM, .LateBrWrongM, .IllegalComp2M, .InstrM, .InstrOrigM, .PCM, .PCSpillM, .IClassM, .BPDirWrongM,
     .BTAWrongM, .RASPredPCWrongM, .IClassWrongM,
     // Faults out
     .IllegalBaseInstrD, .IllegalFPUInstrD, .InstrPageFaultF, .IllegalIEUFPUInstrD, .InstrMisalignedFaultM,
@@ -212,7 +217,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   // integer execution unit: integer register file, datapath and controller
   ieu #(P) ieu(.clk, .reset,
     // Decode Stage interface
-    .InstrD, .Instr2D, .Issue2D, .Issue2M, .Issue2W, .Mem2M, .Illegal2M, .STATUS_FS, .ENVCFG_CBE, .IllegalIEUFPUInstrD, .IllegalBaseInstrD,
+    .InstrD, .Instr2D, .Issue2D, .Issue2M, .Issue2W, .LateA2D, .LateB2D, .LateOK2D, .PredTakenE, .LateBrM, .LateBrTakenM, .LateBrWrongM, .Mem2M, .Illegal2M, .STATUS_FS, .ENVCFG_CBE, .IllegalIEUFPUInstrD, .IllegalBaseInstrD,
     // Execute Stage interface
     .PCE, .PCLinkE, .FWriteIntE, .FCvtIntE, .IEUAdrE, .LSUAdrE, .IntDivE, .W64E,
     .Funct3E, .ForwardedSrcAE, .ForwardedSrcBE, .MDUActiveE, .CMOpM, .IFUPrefetchE, .LSUPrefetchM,
@@ -311,11 +316,13 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   assign MemFault2M = P.ZICSR_SUPPORTED & Mem2M &
                       (LoadMisalignedFaultM | LoadAccessFaultM | LoadPageFaultM |
                        StoreAmoMisalignedFaultM | StoreAmoAccessFaultM | StoreAmoPageFaultM);
-  assign Replay2M = MemFault2M | (P.ZICSR_SUPPORTED & (Illegal2M | IllegalComp2M));
+  // A slot 1 beside a late branch that turns out taken was on the wrong path: it is abandoned, not replayed.
+  assign Replay2RawM = MemFault2M | (P.ZICSR_SUPPORTED & (Illegal2M | IllegalComp2M));
+  assign Replay2M    = Replay2RawM & ~LateBrWrongM;
 
   // global stall and flush control
   hazard hzu(
-    .BPWrongE, .CSRWriteFenceM, .Replay2M, .MemFault2M, .RetM, .TrapM,
+    .BPWrongE, .CSRWriteFenceM, .Replay2M, .MemFault2M, .LateBrWrongM, .RetM, .TrapM,
     .StructuralStallD,
     .LSUStallM, .IFUStallF,
     .FPUStallD, .ExternalStall,
@@ -339,7 +346,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
       .RASPredPCWrongM, .IClassWrongM, .DivBusyE, .FDivBusyE,
       // Issue2M reaches the privileged unit only to increment minstret for slot 1.  A replayed slot 1
       // has not retired -- it is about to run again on its own -- so it must not be counted here.
-      .IClassM, .Issue2M(Issue2M & ~Replay2M), .DCacheMiss, .DCacheAccess, .ICacheMiss, .ICacheAccess, .PrivilegedM,
+      .IClassM, .Issue2M(Issue2M & ~Replay2M & ~LateBrWrongM), .DCacheMiss, .DCacheAccess, .ICacheMiss, .ICacheAccess, .PrivilegedM,
       // The six data faults are masked on replay: slot 1 raised them, but this stage describes slot 0,
       // so the trap is deferred until slot 1 re-runs on its own and can be described correctly.
       .InstrPageFaultF, .LoadPageFaultM(LoadPageFaultM & ~Replay2M), .StoreAmoPageFaultM(StoreAmoPageFaultM & ~Replay2M),

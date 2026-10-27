@@ -50,9 +50,8 @@ module regfile #(parameter XLEN, E_SUPPORTED) (
   // reset is intended for simulation only, not synthesis
   // can logic be adjusted to not need resettable registers?
 
-  // Slot 1 is the later instruction in program order, so it is written second and wins if both
-  // ports target the same register.  The issue logic refuses to pair instructions with the same
-  // destination, so that case should not arise; the ordering is explicit rather than implied.
+  // Slot 1 is the later instruction in program order, so it is written second and wins when both
+  // ports target the same register, which the issue logic permits.
   always_ff @(negedge clk)
     if (reset) for (i=1; i<NUMREGS; i++) rf[i] <= '0;
     else begin

@@ -28,7 +28,7 @@
 // and limitations under the License.
 ////////////////////////////////////////////////////////////////////////////////////////////////
 
-module controller import cvw::*;  #(parameter cvw_t P) (
+module controller import cvw::*;  #(parameter cvw_t P, parameter OTHER_IS_YOUNGER = 1) (
   input  logic        clk, reset,
   // Decode stage control signals
   input  logic        StallD, FlushD,          // Stall, flush Decode stage
@@ -42,6 +42,7 @@ module controller import cvw::*;  #(parameter cvw_t P) (
   output logic        BranchD,                 // Branch instruction
   output logic        StructuralStallD,        // Structural stalls detected by controller
   output logic        StructuralStall2D,       // Slot 1 (superscalar) depends on a result that is not ready to forward
+  output logic        SlowResultE,             // This lane's Execute-stage result is not ready to forward from Memory
   output logic        LoadStallD,              // Structural stalls for load, sent to performance counters
   output logic        StoreStallD,             // load after store hazard
   output logic [4:0]  Rs1D, Rs2D, Rs2E,        // Register sources to read in Decode or Execute stage
@@ -50,6 +51,8 @@ module controller import cvw::*;  #(parameter cvw_t P) (
   // Execute stage control signals
   input  logic        StallE, FlushE,          // Stall, flush Execute stage
   input  logic [1:0]  FlagsE,                  // Comparison flags ({eq, lt})
+  input  logic        LateBrE,                 // This branch's direction is checked in Memory, by the late ALU
+  input  logic        PredTakenE,              // ... so until then it goes the way fetch went
   input  logic        FWriteIntE,              // Write integer register, coming from FPU controller
   input  logic        FCvtIntE,                // FPU convert float to int
   output logic        PCSrcE,                  // Select signal to choose next PC (for datapath and Hazard unit)
@@ -453,7 +456,10 @@ module controller import cvw::*;  #(parameter cvw_t P) (
   assign {eqE, ltE} = FlagsE;
   mux2 #(1) branchflagmux(eqE, ltE, Funct3E[2], BranchFlagE); // Funct3[2]: 0 for beq/bne, 1 for blt/bge/bltu/bgeu
   assign BranchTakenE = BranchFlagE ^ Funct3E[0];              // Funct3[0] inverts the flag for bne/bge/bgeu
-  assign PCSrcE = JumpE | BranchE & BranchTakenE;
+  // A late branch (see ieu.sv) cannot be resolved here: one operand is still a load, multiply or
+  // similar.  It is taken to go the way fetch already went, so it neither redirects nor updates the
+  // predictor on its direction now; the Memory stage checks it and corrects both if needed.
+  assign PCSrcE = JumpE | BranchE & (LateBrE ? PredTakenE : BranchTakenE);
 
   // Other execute stage controller signals
   assign MemReadE = MemRWE[1];
@@ -484,9 +490,9 @@ module controller import cvw::*;  #(parameter cvw_t P) (
   // match: 000 no forward, 001 own Writeback, 010 own Memory, 011 other Writeback, 100 other Memory.
   //
   // Memory is tested before Writeback because it is the newer bundle.  Within a stage the two lanes
-  // are in the same bundle and the issue logic refuses to pair instructions with the same
-  // destination, so they can never both match and their relative order does not matter.  That stops
-  // being true if the no-WAW issue rule is ever relaxed.
+  // are in the same bundle, and they may both write the same register, so the younger -- slot 1 -- is
+  // tested first.  OTHER_IS_YOUNGER says which that is: the other lane for slot 0's controller (the
+  // default), this lane for slot 1's.
   //
   // There is deliberately no bypass from the other lane in Execute: that would chain one ALU into
   // the other within a cycle, and the issue logic refuses to pair instructions that would need it.
@@ -495,16 +501,32 @@ module controller import cvw::*;  #(parameter cvw_t P) (
     ForwardBE = 3'b000;
 
     if (Rs1E != 5'b0)
-      if      ((Rs1E == RdOtherM) & RegWriteOtherM) ForwardAE = 3'b100;
-      else if ((Rs1E == RdM)      & RegWriteM)      ForwardAE = 3'b010;
-      else if ((Rs1E == RdOtherW) & RegWriteOtherW) ForwardAE = 3'b011;
-      else if ((Rs1E == RdW)      & RegWriteW)      ForwardAE = 3'b001;
+      if (OTHER_IS_YOUNGER)
+        if      ((Rs1E == RdOtherM) & RegWriteOtherM) ForwardAE = 3'b100;
+        else if ((Rs1E == RdM)      & RegWriteM)      ForwardAE = 3'b010;
+        else if ((Rs1E == RdOtherW) & RegWriteOtherW) ForwardAE = 3'b011;
+        else if ((Rs1E == RdW)      & RegWriteW)      ForwardAE = 3'b001;
+        else                                          ForwardAE = 3'b000;
+      else
+        if      ((Rs1E == RdM)      & RegWriteM)      ForwardAE = 3'b010;
+        else if ((Rs1E == RdOtherM) & RegWriteOtherM) ForwardAE = 3'b100;
+        else if ((Rs1E == RdW)      & RegWriteW)      ForwardAE = 3'b001;
+        else if ((Rs1E == RdOtherW) & RegWriteOtherW) ForwardAE = 3'b011;
+        else                                          ForwardAE = 3'b000;
 
     if (Rs2E != 5'b0)
-      if      ((Rs2E == RdOtherM) & RegWriteOtherM) ForwardBE = 3'b100;
-      else if ((Rs2E == RdM)      & RegWriteM)      ForwardBE = 3'b010;
-      else if ((Rs2E == RdOtherW) & RegWriteOtherW) ForwardBE = 3'b011;
-      else if ((Rs2E == RdW)      & RegWriteW)      ForwardBE = 3'b001;
+      if (OTHER_IS_YOUNGER)
+        if      ((Rs2E == RdOtherM) & RegWriteOtherM) ForwardBE = 3'b100;
+        else if ((Rs2E == RdM)      & RegWriteM)      ForwardBE = 3'b010;
+        else if ((Rs2E == RdOtherW) & RegWriteOtherW) ForwardBE = 3'b011;
+        else if ((Rs2E == RdW)      & RegWriteW)      ForwardBE = 3'b001;
+        else                                          ForwardBE = 3'b000;
+      else
+        if      ((Rs2E == RdM)      & RegWriteM)      ForwardBE = 3'b010;
+        else if ((Rs2E == RdOtherM) & RegWriteOtherM) ForwardBE = 3'b100;
+        else if ((Rs2E == RdW)      & RegWriteW)      ForwardBE = 3'b001;
+        else if ((Rs2E == RdOtherW) & RegWriteOtherW) ForwardBE = 3'b011;
+        else                                          ForwardBE = 3'b000;
   end
 
   // Stall on dependent operations that finish in Mem Stage and can't bypass in time
@@ -524,5 +546,6 @@ module controller import cvw::*;  #(parameter cvw_t P) (
   // compared against, RdE, belongs to the real pipeline that only this instance has.
   // No store hazard: slot 1 never accesses memory.
   assign MatchD2E = ((Rs1_2D == RdE) | (Rs2_2D == RdE)) & (RdE != 5'b0);
-  assign StructuralStall2D = ((MemReadE | SCE) | CSRReadE | MDUE | FCvtIntE) & MatchD2E;
+  assign SlowResultE = (MemReadE | SCE) | CSRReadE | MDUE | FCvtIntE;
+  assign StructuralStall2D = SlowResultE & MatchD2E;
 endmodule

@@ -26,3 +26,6 @@ date,githash,branch,dirty,note,config,xlen,tech,freq_mhz,maxopt,coremark_ticks,m
 2026-10-12 00:22,50b66f11a,superscalar_wally_decode,yes,"compressed pairing complete (CI/CR, CL/CS, CA/CB, branches+lui in slot 0)",rv32gc,32,sky130,10000,0,1850783,2030146,5.4,2301723,647602,39.15,2399134,2510930.355308,8.572584,116.7,15.859,ifu,ifu=8.57 ieu=8.57 lsu=8.57 Stall=8.36 mdu=8.36 hzu=8.36
 2026-10-25 15:25,c15e515af,superscalar_muldiv,no,superscalar_muldiv: Julia mul/div in slot 1 + upstream merge,rv32gc,32,sky130,10000,0,1814592,2030146,5.51,2303743,671090,41.1,2366808,,,,,,
 2026-10-25 16:09,c15e515af,superscalar_muldiv,yes,fix: killed slot 1 forwarded by c2 (FlushM | PCSrcE),rv32gc,32,sky130,10000,0,1816466,2030156,5.5,2301483,639106,38.45,2369689,,,,,,
+2026-10-26 01:18,ce17e116d,superscalar_wally_decode,no,baseline before late ALU (ce17e116d),rv32gc,32,sky130,10000,0,1816448,2030156,5.5,2300592,638904,38.45,2367725,,,,,,
+2026-10-26 01:22,ce17e116d,superscalar_wally_decode,yes,late ALU in Memory for dependent slot 1 ALU ops,rv32gc,32,sky130,10000,0,1815483,2030156,5.5,2300619,646778,39.11,2366679,,,,,,
+2026-10-26 20:27,ce17e116d,superscalar_wally_decode,yes,late ALU + same-rd + W fwd + late branch,rv32gc,32,sky130,10000,0,1689425,2030156,5.91,2301591,647750,39.17,2240166,,,,,,

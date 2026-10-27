@@ -49,7 +49,9 @@ module issue import cvw::*;  #(parameter cvw_t P) (
   input  logic [31:0] Instr1F,        // Slot 1 raw instruction, already aligned to bit 0
   input  logic        Instr2ValidF,   // Slot 1 holds a complete instruction from the I$
   input  logic        BPPCSrcF,       // Branch predictor says this fetch is a taken branch or jump
-  output logic        Issue2F         // Both slots may issue together this cycle
+  output logic        Issue2F,        // Both slots may issue together this cycle
+  output logic        LateA2F, LateB2F, // Slot 1's rs1 / rs2 is slot 0's rd: its operand comes from the late ALU's bypass
+  output logic        LateOK2F          // Slot 1 is an operation the late ALU implements
 );
 
   // Opcodes
@@ -75,7 +77,10 @@ module issue import cvw::*;  #(parameter cvw_t P) (
   logic       Recognized0F, Recognized1F;    // instrfields decoded this slot's fields
   logic [1:0] MemRW0F, MemRW1F;              // ... and whether it uses the load/store unit
   logic       IsBranch0F, IsBranch1F;        // ... and whether each slot is a conditional branch
-  logic       BothRecognizedF, Slot0CanPairF, Slot1CanPairF, NoDependencyF;
+  logic       BothRecognizedF, Slot0CanPairF, Slot1CanPairF, DependencyOKF;
+  logic       Slot0EarlyF;                // Slot 0 is an integer ALU operation: its result is in IEUResultM
+  logic       Slot1LateOKF;               // Slot 1 is an operation the late ALU implements
+  logic       SrcDepF, SameRdF;           // Slot 1 reads / overwrites slot 0's destination (SameRdF: statistics only)
   logic       Slot0IsMemF, Slot1IsMemF, OneMemOpF;
   logic       MExtF;                      // Slot 1 is a multiply/divide, which needs the one MDU
   logic       MulF;                       // ... and specifically a multiply, which the MDU can take from slot 1
@@ -208,12 +213,80 @@ module issue import cvw::*;  #(parameter cvw_t P) (
       default:    Slot1CanPairF = 1'b0;
     endcase
 
-  // Slot 1 must not depend on slot 0.  Forwarding slot 0's result to slot 1 within the same cycle
-  // would chain one ALU into the other and roughly double the critical path, so such pairs simply
-  // issue one at a time.  Rd0F is treated as a destination whenever it is nonzero, which is
-  // conservative for stores (where those bits are part of the immediate) but never unsafe.
-  assign NoDependencyF = (Rd0F == 5'b0) |
-                         ((Rs1_1F != Rd0F) & (Rs2_1F != Rd0F) & (Rd1F != Rd0F));
+  // Slot 1 may read slot 0's result only through the late ALU in the Memory stage.  Forwarding it
+  // within Execute would chain one ALU into the other and roughly double the critical path; one
+  // stage later slot 0's result is already in its IEUResultM register, and the late ALU takes it
+  // from there.  Rd0F is treated as a destination whenever it is nonzero, which is conservative for
+  // stores and branches (where those bits are part of the immediate) but never unsafe.
+  assign SrcDepF = (Rd0F != 5'b0) & ((Rs1_1F == Rd0F) | (Rs2_1F == Rd0F));
+  assign SameRdF = (Rd0F != 5'b0) & (Rd1F == Rd0F);
+
+  // A dependent pair needs slot 0's result at the start of Memory, so slot 0 must be an integer ALU
+  // operation -- not a load, a multiply or divide, a CSR read or an FPU-to-integer move, whose results
+  // arrive later.  The opcodes are the ones whose IEUResultE is final; a compressed slot 0 has already
+  // been vouched for by instrfields, and with its memory operations and branches excluded the formats
+  // left are all ALU operations.  OP and OP-32 carry the multiplies and divides at funct7 = 0000001.
+  always_comb
+    if (~&Instr0F[1:0]) Slot0EarlyF = ~|MemRW0F & ~IsBranch0F;
+    else case (Op0F)
+      LUI, AUIPC, OP_IMM: Slot0EarlyF = 1'b1;
+      OP_IMM_32:          Slot0EarlyF = (P.XLEN == 64);
+      OP:                 Slot0EarlyF = (Instr0F[31:25] != 7'b0000001);
+      OP_32:              Slot0EarlyF = (P.XLEN == 64) & (Instr0F[31:25] != 7'b0000001);
+      default:            Slot0EarlyF = 1'b0;
+    endcase
+
+  // The late ALU implements add, sub, the logical operations, shifts and set-less-than, with their RV64
+  // W forms -- but no bit-manipulation, crypto or czero.  Those share the OP/OP-IMM opcodes and are
+  // told apart here by funct7 (funct6 for an RV64 shift immediate), so a dependent bitmanip operation
+  // simply does not pair.  An encoding admitted here that turns out illegal is still caught by c2 and
+  // replayed, as for any slot 1.  Every compressed ALU format instrfields recognizes is a base
+  // operation.  LUI and AUIPC read no register: their raw rs fields can match Rd0F only by accident,
+  // so admitting them only removes false dependencies -- ieu.sv clears the late bits for an operand
+  // that is not a register, and they execute in Execute as usual.
+  always_comb
+    if (~&Instr1F[1:0]) Slot1LateOKF = ~|MemRW1F & ~IsBranch1F;
+    else case (Op1F)
+      LUI, AUIPC: Slot1LateOKF = 1'b1;
+      OP_IMM:     case (Funct3_1F)
+                    3'b001:  Slot1LateOKF = (Instr1F[31:26] == 6'b000000);                                    // slli
+                    3'b101:  Slot1LateOKF = (Instr1F[31:26] == 6'b000000) | (Instr1F[31:26] == 6'b010000);   // srli, srai
+                    default: Slot1LateOKF = 1'b1;                                                             // addi, slti(u), xori, ori, andi
+                  endcase
+      OP_IMM_32:  case (Funct3_1F)
+                    3'b000:  Slot1LateOKF = (P.XLEN == 64);                                                   // addiw
+                    3'b001:  Slot1LateOKF = (P.XLEN == 64) & (Funct7_1F == 7'b0000000);                      // slliw
+                    3'b101:  Slot1LateOKF = (P.XLEN == 64) & ((Funct7_1F == 7'b0000000) | (Funct7_1F == 7'b0100000)); // srliw, sraiw
+                    default: Slot1LateOKF = 1'b0;
+                  endcase
+      // add, sll, slt, sltu, xor, srl, or, and at funct7 = 0; sub and sra at 0100000
+      OP:         Slot1LateOKF = (Funct7_1F == 7'b0000000) |
+                                 ((Funct7_1F == 7'b0100000) & ((Funct3_1F == 3'b000) | (Funct3_1F == 3'b101)));
+      // addw, sllw, srlw at funct7 = 0; subw, sraw at 0100000
+      OP_32:      Slot1LateOKF = (P.XLEN == 64) &
+                                 (((Funct7_1F == 7'b0000000) & ((Funct3_1F == 3'b000) | (Funct3_1F == 3'b001) | (Funct3_1F == 3'b101))) |
+                                  ((Funct7_1F == 7'b0100000) & ((Funct3_1F == 3'b000) | (Funct3_1F == 3'b101))));
+      default:    Slot1LateOKF = 1'b0;
+    endcase
+
+  // Both slots may write the same register.  Slot 1 is the later instruction, so its value must win
+  // everywhere: regfile.sv writes port 6 second, and controller.sv's forwarding prefers slot 1 over slot
+  // 0 within a stage.  Every stall is keyed on each slot's own destination, so a younger slot 1 that
+  // overwrites a slow slot 0 result (a load, say) can only cost an unneeded stall, never a stale value.
+  //
+  // A late pair that also shares its destination is still refused, for performance rather than
+  // correctness.  Such pairs are almost always the first two links of a chain (addi a5,a5,1; slli
+  // a5,a5,2; ...) whose next instruction reads the late result at once and stalls for it.  Issuing the
+  // first link alone leaves the late ALU free for the second link, which gets the same work done one
+  // instruction further on.  Admitting them cost rv64gc CoreMark 0.3%.
+  assign DependencyOKF = ~SrcDepF | (Slot0EarlyF & Slot1LateOKF & ~SameRdF);
+
+  // Which of slot 1's operands are slot 0's result.  These are the same fields the pairing decision
+  // used, so a dependency that permitted the pair is always marked; ieu.sv clears a bit whose operand
+  // is an immediate or the PC rather than a register.
+  assign LateOK2F = Slot1LateOKF;
+  assign LateA2F = (Rd0F != 5'b0) & (Rs1_1F == Rd0F);
+  assign LateB2F = (Rd0F != 5'b0) & (Rs2_1F == Rd0F);
 
   // The core has one load/store unit, so a bundle may contain at most one memory operation -- but it
   // may sit in either slot, and ieu.sv steers the LSU's inputs to whichever one holds it.  Slot 0's
@@ -231,6 +304,6 @@ module issue import cvw::*;  #(parameter cvw_t P) (
   assign OneMduOpF   = ~(Slot0IsMduF & Slot1IsMduF);
 
   assign Issue2F = Instr2ValidF & BothRecognizedF & Slot0CanPairF & Slot1CanPairF &
-                   NoDependencyF & OneMemOpF & OneMduOpF;
+                   DependencyOKF & OneMemOpF & OneMduOpF;
 
 endmodule

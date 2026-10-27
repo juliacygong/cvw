@@ -674,7 +674,7 @@ module testbench;
       if (~reset & dut.core.ifu.Issue2D & RecF & ~dut.core.ifu.IllegalCompInstr2D) begin
         FieldChecks <= FieldChecks + 1;
         // The property that matters is one-sided.  Naming a register the instruction does not touch
-        // only makes NoDependencyF refuse a pair it could have taken -- harmless.  *Missing* one
+        // only makes issue.sv's dependency check refuse a pair it could have taken -- harmless.  *Missing* one
         // permits a dependent pair, which corrupts data silently.  So a nonzero register in the
         // decompressed form must be reported exactly; x0 means no dependency and anything is safe.
         // This also accommodates the HINT encodings, which decompress.sv turns into a nop (see its
@@ -848,6 +848,10 @@ module testbench;
     integer Div2 = 0;                       // slot 1 divides that committed
     integer KilledDiv2 = 0;                 // slot 1 divides in Execute beside a taken branch (must be 0)
     integer MulUse2 = 0;                    // cycles stalled because a slot 1 multiply's product was not ready
+    integer DepSlot1Load = 0, DepSameRdOnly = 0, DepSameRd = 0, DepSlot0Late = 0, DepSlot1Op = 0; // dependency blocks: same rd, slot 0 result late, slot 1 not a late-ALU op
+    integer LateBr = 0, LateBrWrong = 0;   // branches resolved in Memory, and how many fetch got wrong
+    integer Late2 = 0;                      // bundles whose slot 1 executed on the late ALU
+    integer LateUse2 = 0;                   // cycles stalled because a late slot 1's result was not ready
     integer BlockUnrec0 = 0;                // ... solely because SLOT 0's encoding is not in instrfields
     integer BlockUnrec1 = 0;                // ... solely because SLOT 1's is
     logic Cfi1F, Br1F, Jmp1F, Refused;
@@ -876,7 +880,7 @@ module testbench;
           PairOpportunity <= PairOpportunity + 1;
           if (~dut.core.ifu.issue.Slot1CanPairF & Cfi1F
               & dut.core.ifu.issue.BothRecognizedF & dut.core.ifu.issue.Slot0CanPairF
-              & dut.core.ifu.issue.NoDependencyF    & dut.core.ifu.issue.OneMemOpF & dut.core.ifu.issue.OneMduOpF) begin
+              & dut.core.ifu.issue.DependencyOKF    & dut.core.ifu.issue.OneMemOpF & dut.core.ifu.issue.OneMduOpF) begin
             if (Br1F) begin
               BlockBranch1 <= BlockBranch1 + 1;
               if (~dut.core.ifu.PCF[2]) BlockBranch1Aligned <= BlockBranch1Aligned + 1;
@@ -887,17 +891,17 @@ module testbench;
           // since slot 1 multiplies were admitted this counts divides only.
           if (~dut.core.ifu.issue.Slot1CanPairF & dut.core.ifu.issue.MExtF & ~Cfi1F
               & dut.core.ifu.issue.BothRecognizedF & dut.core.ifu.issue.Slot0CanPairF
-              & dut.core.ifu.issue.NoDependencyF   & dut.core.ifu.issue.OneMemOpF & dut.core.ifu.issue.OneMduOpF)
+              & dut.core.ifu.issue.DependencyOKF   & dut.core.ifu.issue.OneMemOpF & dut.core.ifu.issue.OneMduOpF)
             BlockMDU1 <= BlockMDU1 + 1;
           if (~dut.core.ifu.issue.OneMduOpF
               & dut.core.ifu.issue.BothRecognizedF & dut.core.ifu.issue.Slot0CanPairF
-              & dut.core.ifu.issue.Slot1CanPairF     & dut.core.ifu.issue.NoDependencyF & dut.core.ifu.issue.OneMemOpF)
+              & dut.core.ifu.issue.Slot1CanPairF     & dut.core.ifu.issue.DependencyOKF & dut.core.ifu.issue.OneMemOpF)
             BlockOneMdu <= BlockOneMdu + 1;
           if (~dut.core.ifu.issue.BothRecognizedF) AnyCompressed <= AnyCompressed + 1;
-          if (~dut.core.ifu.issue.NoDependencyF)      AnyDep        <= AnyDep + 1;
+          if (~dut.core.ifu.issue.DependencyOKF)      AnyDep        <= AnyDep + 1;
           if (~dut.core.ifu.issue.BothRecognizedF
               & dut.core.ifu.issue.Slot0CanPairF & dut.core.ifu.issue.Slot1CanPairF
-              & dut.core.ifu.issue.NoDependencyF & dut.core.ifu.issue.OneMemOpF & dut.core.ifu.issue.OneMduOpF) begin
+              & dut.core.ifu.issue.DependencyOKF & dut.core.ifu.issue.OneMemOpF & dut.core.ifu.issue.OneMduOpF) begin
             BlockCompressed <= BlockCompressed + 1;
             // Which slot's encoding instrfields failed to recognise.  A gap in slot 0 is pure
             // conservatism -- slot 0 executes everything it always did -- so it bounds what the
@@ -905,17 +909,30 @@ module testbench;
             if (~dut.core.ifu.issue.Recognized0F) BlockUnrec0 <= BlockUnrec0 + 1;
             if (~dut.core.ifu.issue.Recognized1F) BlockUnrec1 <= BlockUnrec1 + 1;
           end
-          if (~dut.core.ifu.issue.NoDependencyF
+          if (~dut.core.ifu.issue.DependencyOKF
               & dut.core.ifu.issue.BothRecognizedF & dut.core.ifu.issue.Slot0CanPairF
               & dut.core.ifu.issue.Slot1CanPairF    & dut.core.ifu.issue.OneMemOpF & dut.core.ifu.issue.OneMduOpF)
+          begin
             BlockDep <= BlockDep + 1;
+            // Why the late ALU could not take it.  Not exclusive: a pair can fail several ways.
+            if (dut.core.ifu.issue.SameRdF)                                  DepSameRd   <= DepSameRd + 1;
+            // ... and how many of those were refused only for the shared destination
+            if (dut.core.ifu.issue.SameRdF & (~dut.core.ifu.issue.SrcDepF |
+                (dut.core.ifu.issue.Slot0EarlyF & dut.core.ifu.issue.Slot1LateOKF))) DepSameRdOnly <= DepSameRdOnly + 1;
+            if (dut.core.ifu.issue.SrcDepF & ~dut.core.ifu.issue.Slot0EarlyF)  DepSlot0Late <= DepSlot0Late + 1;
+            if (dut.core.ifu.issue.SrcDepF & ~dut.core.ifu.issue.Slot1LateOKF) DepSlot1Op  <= DepSlot1Op + 1;
+            // ... of which a slot 1 load whose address comes from a slot 0 ALU result: what a late
+            // address into the LSU could take
+            if (dut.core.ifu.issue.SrcDepF & ~dut.core.ifu.issue.SameRdF & dut.core.ifu.issue.Slot0EarlyF
+                & dut.core.ifu.issue.MemRW1F[1])                                DepSlot1Load <= DepSlot1Load + 1;
+          end
           if (~dut.core.ifu.issue.Slot0CanPairF
               & dut.core.ifu.issue.BothRecognizedF & dut.core.ifu.issue.Slot1CanPairF
-              & dut.core.ifu.issue.NoDependencyF     & dut.core.ifu.issue.OneMemOpF & dut.core.ifu.issue.OneMduOpF)
+              & dut.core.ifu.issue.DependencyOKF     & dut.core.ifu.issue.OneMemOpF & dut.core.ifu.issue.OneMduOpF)
             BlockSlot0 <= BlockSlot0 + 1;
           if (~dut.core.ifu.issue.OneMemOpF
               & dut.core.ifu.issue.BothRecognizedF & dut.core.ifu.issue.Slot0CanPairF
-              & dut.core.ifu.issue.Slot1CanPairF     & dut.core.ifu.issue.NoDependencyF & dut.core.ifu.issue.OneMduOpF)
+              & dut.core.ifu.issue.Slot1CanPairF     & dut.core.ifu.issue.DependencyOKF & dut.core.ifu.issue.OneMduOpF)
             BlockOneMem <= BlockOneMem + 1;
         end
         if (dut.core.ifu.BPWrongE)                             FlushMispredict <= FlushMispredict + 1;
@@ -924,6 +941,12 @@ module testbench;
         if (dut.core.Replay2M & ~dut.core.StallM)               Replays <= Replays + 1;
         if (dut.core.ieu.LoadStall2D       & ~dut.core.StallE)  LoadUse2    <= LoadUse2 + 1;
         if (dut.core.ieu.MDUStall2D        & ~dut.core.StallE)  MulUse2     <= MulUse2 + 1;
+        if (dut.core.ieu.LateStall2D       & ~dut.core.StallE)  LateUse2    <= LateUse2 + 1;
+        if (dut.core.LateBrM & ~dut.core.StallM & ~dut.core.FlushW) begin
+          LateBr <= LateBr + 1;
+          if (dut.core.LateBrWrongM) LateBrWrong <= LateBrWrong + 1;
+        end
+        if (dut.core.ieu.dp.Late2M & dut.core.ifu.Issue2M & ~dut.core.StallM & ~dut.core.FlushM) Late2 <= Late2 + 1;
         if (dut.core.ieu.Mdu2M & dut.core.ifu.Issue2M & ~dut.core.StallM & ~dut.core.FlushM) begin
           if (dut.core.ieu.MDUFunct3M[2]) Div2 <= Div2 + 1;
           else                            Mul2 <= Mul2 + 1;
@@ -949,19 +972,147 @@ module testbench;
           $error("replayed slot 1 store was not cancelled at the LSU: the write will reach memory");
         end
       end
+    // Brainstorming breakdowns (measurement only).
+    integer S0Jump = 0, S0PredTaken = 0, S0System = 0, S0Fence = 0;   // why slot 0 could not carry a partner
+    integer DepS1Mul = 0, DepS1Other = 0;                              // dependent slot 1 the late ALU lacks
+    integer LateUseS0 = 0, LateUseS1Only = 0, LateUseS1OnlyAlu = 0;    // late-use stall: who consumed
+    integer LoadUseS0 = 0, LoadUseS1Only = 0, LoadUseS1OnlyAlu = 0;    // load-use stall: who consumed
+    logic [6:0] Op2D; logic [6:0] F7_2D; logic S1BaseAluD;
+    logic S0LoadUseD, S1LoadUseD, S0LateUseD, S1LateUseD;
+    assign Op2D  = dut.core.ieu.Instr2D[6:0];
+    assign F7_2D = dut.core.ieu.Instr2D[31:25];
+    // Slot 1 in Decode is an operation a late ALU could do (approximate: base OP/OP-IMM forms)
+    assign S1BaseAluD = (Op2D == 7'b0010011) | (Op2D == 7'b0011011) |
+                        (((Op2D == 7'b0110011) | (Op2D == 7'b0111011)) & ((F7_2D == 7'b0) | (F7_2D == 7'b0100000)));
+    assign S0LoadUseD = (dut.core.ieu.c.MemReadE & (dut.core.ieu.RdE != 0) &
+                         ((dut.core.ieu.Rs1D == dut.core.ieu.RdE) | (dut.core.ieu.Rs2D == dut.core.ieu.RdE))) |
+                        (dut.core.ieu.MemRW2E[1] & (dut.core.ieu.Rd2E != 0) &
+                         ((dut.core.ieu.Rs1D == dut.core.ieu.Rd2E) | (dut.core.ieu.Rs2D == dut.core.ieu.Rd2E)));
+    assign S1LoadUseD = dut.core.ieu.Issue2D &
+                        ((dut.core.ieu.c.MemReadE & (dut.core.ieu.RdE != 0) &
+                          ((dut.core.ieu.Rs1_2D == dut.core.ieu.RdE) | (dut.core.ieu.Rs2_2D == dut.core.ieu.RdE))) |
+                         (dut.core.ieu.MemRW2E[1] & (dut.core.ieu.Rd2E != 0) &
+                          ((dut.core.ieu.Rs1_2D == dut.core.ieu.Rd2E) | (dut.core.ieu.Rs2_2D == dut.core.ieu.Rd2E))));
+    assign S0LateUseD = dut.core.ieu.Late2E & (dut.core.ieu.Rd2E != 0) &
+                        ((dut.core.ieu.Rs1D == dut.core.ieu.Rd2E) | (dut.core.ieu.Rs2D == dut.core.ieu.Rd2E));
+    assign S1LateUseD = dut.core.ieu.Late2E & dut.core.ieu.Issue2D & (dut.core.ieu.Rd2E != 0) &
+                        ((dut.core.ieu.Rs1_2D == dut.core.ieu.Rd2E) | (dut.core.ieu.Rs2_2D == dut.core.ieu.Rd2E));
+    always_ff @(posedge clk)
+      if (~reset) begin
+        if (Refused & ~dut.core.ifu.issue.Slot0CanPairF
+            & dut.core.ifu.issue.BothRecognizedF & dut.core.ifu.issue.Slot1CanPairF
+            & dut.core.ifu.issue.DependencyOKF & dut.core.ifu.issue.OneMemOpF & dut.core.ifu.issue.OneMduOpF) begin
+          if ((dut.core.ifu.issue.Op0F == 7'b1101111) | (dut.core.ifu.issue.Op0F == 7'b1100111)) S0Jump <= S0Jump + 1;
+          else if (dut.core.ifu.issue.BPPCSrcF)                                                  S0PredTaken <= S0PredTaken + 1;
+          else if (dut.core.ifu.issue.Op0F == 7'b1110011)                                         S0System <= S0System + 1;
+          else                                                                                    S0Fence <= S0Fence + 1;
+        end
+        if (Refused & ~dut.core.ifu.issue.DependencyOKF & dut.core.ifu.issue.BothRecognizedF
+            & dut.core.ifu.issue.Slot0CanPairF & dut.core.ifu.issue.Slot1CanPairF
+            & dut.core.ifu.issue.OneMemOpF & dut.core.ifu.issue.OneMduOpF
+            & dut.core.ifu.issue.SrcDepF & ~dut.core.ifu.issue.SameRdF & dut.core.ifu.issue.Slot0EarlyF
+            & ~dut.core.ifu.issue.Slot1LateOKF & ~dut.core.ifu.issue.MemRW1F[1]) begin
+          if (dut.core.ifu.issue.MExtF) DepS1Mul <= DepS1Mul + 1;
+          else                          DepS1Other <= DepS1Other + 1;
+        end
+        if (dut.core.StallD & ~dut.core.StallE & ~dut.core.FlushD) begin
+          if (S0LoadUseD) LoadUseS0 <= LoadUseS0 + 1;
+          else if (S1LoadUseD) begin
+            LoadUseS1Only <= LoadUseS1Only + 1;
+            if (S1BaseAluD) LoadUseS1OnlyAlu <= LoadUseS1OnlyAlu + 1;
+          end
+          if (S0LateUseD) LateUseS0 <= LateUseS0 + 1;
+          else if (S1LateUseD) begin
+            LateUseS1Only <= LateUseS1Only + 1;
+            if (S1BaseAluD) LateUseS1OnlyAlu <= LateUseS1OnlyAlu + 1;
+          end
+        end
+      end
+    final
+      $display("brainstorm: slot0-unpairable jump=%0d predtaken=%0d system=%0d fence=%0d | dep slot1 not late: mul=%0d other(bitmanip)=%0d | loaduse consumer slot0=%0d slot1only=%0d (base ALU %0d) | lateuse consumer slot0=%0d slot1only=%0d (base ALU %0d)",
+               S0Jump, S0PredTaken, S0System, S0Fence, DepS1Mul, DepS1Other, LoadUseS0, LoadUseS1Only, LoadUseS1OnlyAlu, LateUseS0, LateUseS1Only, LateUseS1OnlyAlu);
+
+    // Could slot 0's load-use consumer have used a shared late ALU?  Upper bounds, per stall cycle.
+    integer S0LU_Alu = 0, S0LU_AluConflict = 0, S0LU_StoreData = 0, S0LU_Branch = 0, S0LU_Other = 0;
+    logic [6:0] Op0D; logic [6:0] F7_0D; logic S0BaseAluD, LdRs1, LdRs2, S1WantsLate;
+    logic [4:0] Rs1_0D, Rs2_0D;
+    assign Op0D  = dut.core.ieu.InstrD[6:0];
+    assign F7_0D = dut.core.ieu.InstrD[31:25];
+    assign Rs1_0D = dut.core.ieu.Rs1D;
+    assign Rs2_0D = dut.core.ieu.Rs2D;
+    assign S0BaseAluD = (Op0D == 7'b0010011) | (Op0D == 7'b0011011) |
+                        (((Op0D == 7'b0110011) | (Op0D == 7'b0111011)) & ((F7_0D == 7'b0) | (F7_0D == 7'b0100000)));
+    // Which of slot 0's sources are a load's destination in Execute (either lane)
+    assign LdRs1 = (dut.core.ieu.c.MemReadE & (dut.core.ieu.RdE != 0) & (Rs1_0D == dut.core.ieu.RdE)) |
+                   (dut.core.ieu.MemRW2E[1] & (dut.core.ieu.Rd2E != 0) & (Rs1_0D == dut.core.ieu.Rd2E));
+    assign LdRs2 = (dut.core.ieu.c.MemReadE & (dut.core.ieu.RdE != 0) & (Rs2_0D == dut.core.ieu.RdE)) |
+                   (dut.core.ieu.MemRW2E[1] & (dut.core.ieu.Rd2E != 0) & (Rs2_0D == dut.core.ieu.Rd2E));
+    // Slot 1 of the same bundle also needs the one late ALU: it reads slot 0, or it is a load-use consumer itself
+    assign S1WantsLate = dut.core.ieu.Issue2D & (dut.core.ieu.LateA2D | dut.core.ieu.LateB2D | S1LoadUseD);
+    always_ff @(posedge clk)
+      if (~reset & dut.core.StallD & ~dut.core.StallE & ~dut.core.FlushD & S0LoadUseD) begin
+        if (S0BaseAluD) begin
+          if (S1WantsLate) S0LU_AluConflict <= S0LU_AluConflict + 1;
+          else             S0LU_Alu <= S0LU_Alu + 1;
+        end
+        else if ((Op0D == 7'b0100011) & LdRs2 & ~LdRs1) S0LU_StoreData <= S0LU_StoreData + 1;
+        else if (Op0D == 7'b1100011)                    S0LU_Branch <= S0LU_Branch + 1;
+        else                                            S0LU_Other <= S0LU_Other + 1;
+      end
+    // Of those, how often the next bundle reads the ALU op's result: a shared late ALU would only move
+    // that stall one bundle later.
+    integer S0LU_NextDep = 0, S0LU_Seen = 0;
+    logic Cand, CandLeft; logic [4:0] CandRd;
+    always_ff @(posedge clk)
+      if (reset) begin Cand <= 0; CandLeft <= 0; end
+      else begin
+        if (dut.core.StallD & ~dut.core.StallE & ~dut.core.FlushD & S0LoadUseD & S0BaseAluD & ~S1WantsLate) begin
+          Cand <= 1; CandRd <= dut.core.ieu.InstrD[11:7];
+        end else if (Cand & ~dut.core.StallD) begin Cand <= 0; CandLeft <= 1; end
+        if (CandLeft & ~dut.core.FlushD & dut.core.ifu.InstrValidD) begin
+          CandLeft <= 0; S0LU_Seen <= S0LU_Seen + 1;
+          if ((CandRd != 0) & ((dut.core.ieu.Rs1D == CandRd) | (dut.core.ieu.Rs2D == CandRd) |
+              (dut.core.ieu.Issue2D & ((dut.core.ieu.Rs1_2D == CandRd) | (dut.core.ieu.Rs2_2D == CandRd)))))
+            S0LU_NextDep <= S0LU_NextDep + 1;
+        end else if (CandLeft & dut.core.FlushD) CandLeft <= 0;
+      end
+    // Load-dependent branches: how many were mispredicted anyway.  Resolving these in Memory from the
+    // load data would remove the stall for the rest, at one extra cycle on each of these.
+    integer LdBrSeen = 0, LdBrWrong = 0;
+    logic BrCand, BrInE;
+    always_ff @(posedge clk)
+      if (reset) begin BrCand <= 0; BrInE <= 0; end
+      else begin
+        BrInE <= 0;
+        if (dut.core.StallD & ~dut.core.StallE & ~dut.core.FlushD & S0LoadUseD & (Op0D == 7'b1100011)) BrCand <= 1;
+        else if (BrCand & ~dut.core.StallD) begin BrCand <= 0; BrInE <= ~dut.core.FlushD; end
+        if (BrInE & ~dut.core.StallE) begin
+          LdBrSeen <= LdBrSeen + 1;
+          if (dut.core.ifu.BPWrongE) LdBrWrong <= LdBrWrong + 1;
+        end
+      end
+    final $display("load-dependent branches: %0d reached Execute, %0d mispredicted", LdBrSeen, LdBrWrong);
+    final $display("slot0 load-use ALU candidates: next bundle reads its result in %0d of %0d", S0LU_NextDep, S0LU_Seen);
+    final
+      $display("slot0 load-use: base ALU=%0d (+%0d where slot 1 also needs the late ALU) | store data only=%0d | branch=%0d | other (load/store address, jalr, ...)=%0d",
+               S0LU_Alu, S0LU_AluConflict, S0LU_StoreData, S0LU_Branch, S0LU_Other);
+
     // minstret must equal the number of instructions actually committed.  Both count from reset and
     // use the same condition, so any difference is the counter being wrong -- which matters because
     // a slot 1 abandoned in Execute must not be counted as retired.
     integer Committed = 0;
     always_ff @(posedge clk)
       if (~reset & dut.core.ieu.c.InstrValidM & ~dut.core.StallW & ~dut.core.FlushW)
-        Committed <= Committed + 1 + ((dut.core.ifu.Issue2M & ~dut.core.Replay2M) ? 1 : 0);
+        Committed <= Committed + 1 + ((dut.core.ifu.Issue2M & ~dut.core.Replay2M & ~dut.core.LateBrWrongM) ? 1 : 0);
 
     final begin
       $display("overhead: %0d cycles | stall slot0=%0d slot1=%0d other=%0d | mispredict=%0d | slot1 kills=%0d | slot1 mem=%0d replays=%0d | slot1 mul=%0d div=%0d | hazards: loaduse2=%0d muluse2=%0d bundlestore=%0d | replay ld=%0d st=%0d | branch+slot1mem=%0d | replay store leaks=%0d (must be 0) | killed slot1 divs=%0d (must be 0)",
                Cycles, StallSlot0, StallSlot1, StallOther, FlushMispredict, Kills, Mem2, Replays, Mul2, Div2, LoadUse2, MulUse2, BundleStore, Replay2Ld, Replay2St, BrWithMem2, ReplayStoreLeak, KilledDiv2);
       $display("pairing refused: %0d opportunities | sole cause: branch in slot1=%0d (8B-aligned=%0d) jump in slot1=%0d div in slot1=%0d compressed=%0d dependency=%0d slot0=%0d onemem=%0d onemdu=%0d (unrec slot0=%0d slot1=%0d) | any-cause: compressed=%0d dependency=%0d",
                PairOpportunity, BlockBranch1, BlockBranch1Aligned, BlockJump1, BlockMDU1, BlockCompressed, BlockDep, BlockSlot0, BlockOneMem, BlockOneMdu, BlockUnrec0, BlockUnrec1, AnyCompressed, AnyDep);
+      $display("late branch: resolved in Memory=%0d, of which fetch went the wrong way=%0d", LateBr, LateBrWrong);
+      $display("late ALU: slot1 late=%0d | lateuse2 stalls=%0d | dependency still refused: same rd=%0d (only cause %0d) slot0 not ALU=%0d slot1 not late op=%0d (dependent load after ALU op=%0d)",
+               Late2, LateUse2, DepSameRd, DepSameRdOnly, DepSlot0Late, DepSlot1Op, DepSlot1Load);
       if (P.ZICSR_SUPPORTED)
         $display("minstret check: committed=%0d minstret=%0d %s", Committed,
                  dut.core.priv.priv.csr.counters.HPMCOUNTER_REGW[2],

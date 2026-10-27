@@ -295,6 +295,12 @@ module wallyTracer import cvw::*; #(parameter cvw_t P) (rvviTrace rvvi);
   // must not be attributed to slot 0.
   assign rf_a6  = testbench.dut.core.ieu.dp.regf.a6;
   assign rf_we6 = testbench.dut.core.ieu.dp.regf.we6;
+  // When both slots write the same register, the register file ends the cycle holding slot 1's value,
+  // so slot 0's record must report what slot 0 wrote, taken from its own write port.
+  logic [P.XLEN-1:0] rf_wd3;
+  logic              rf_samerd;
+  assign rf_wd3    = testbench.dut.core.ieu.dp.regf.wd3;
+  assign rf_samerd = rf_we3 & rf_we6 & (rf_a3 == rf_a6);
 
   always_comb begin
     rf_wb <= 0;
@@ -440,7 +446,7 @@ module wallyTracer import cvw::*; #(parameter cvw_t P) (rvviTrace rvvi);
                                ~FlushD ? PCF : PCNextF;
 
   for(genvar index = 0; index < NUM_REGS; index += 1) begin
-    assign rvvi.x_wdata[0][0][index] = rf[index];
+    assign rvvi.x_wdata[0][0][index] = (rf_samerd & (rf_a3 == index)) ? rf_wd3 : rf[index];
     assign rvvi.x_wb[0][0][index]    = rf_wb[index];
   end
   for(genvar index = 0; index < 32; index += 1) begin

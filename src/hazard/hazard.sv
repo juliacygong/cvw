@@ -30,6 +30,7 @@
 module hazard (
   input  logic  BPWrongE, CSRWriteFenceM, Replay2M, RetM, TrapM,
   input  logic  MemFault2M,            // slot 1's memory access faulted: its LSU stall is for a squashed access
+  input  logic  LateBrWrongM,          // a branch resolved in Memory went the other way from fetch
   input  logic  StructuralStallD,
   input  logic  LSUStallM, IFUStallF,
   input  logic  FPUStallD, ExternalStall,
@@ -67,9 +68,12 @@ module hazard (
   // slot 1's own PC, so it flushes exactly what a CSR write or fence does: D, E and M but not W.
   // Leaving W alone is the point -- slot 0 is architecturally before the faulting slot 1 and completed,
   // so it must still commit, just as a CSR write commits while the instructions behind it are flushed.
-  assign FlushDCause = TrapM | RetM | CSRWriteFenceM | Replay2M | BPWrongE;
-  assign FlushECause = TrapM | RetM | CSRWriteFenceM | Replay2M | (BPWrongE & ~(DivBusyE | FDivBusyE));
-  assign FlushMCause = TrapM | RetM | CSRWriteFenceM | Replay2M;
+  // A branch resolved in Memory (LateBrWrongM) that fetch got wrong discards the same three stages, for
+  // the same reason; slot 1 beside it, in Memory, is abandoned through Issue2W rather than FlushW.  Unlike
+  // an Execute-stage misprediction, a divide already busy in Execute is behind the branch and wrong-path.
+  assign FlushDCause = TrapM | RetM | CSRWriteFenceM | Replay2M | LateBrWrongM | BPWrongE;
+  assign FlushECause = TrapM | RetM | CSRWriteFenceM | Replay2M | LateBrWrongM | (BPWrongE & ~(DivBusyE | FDivBusyE));
+  assign FlushMCause = TrapM | RetM | CSRWriteFenceM | Replay2M | LateBrWrongM;
   assign FlushWCause = TrapM;
 
   // Stall causes
