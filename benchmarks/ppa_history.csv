@@ -29,3 +29,4 @@ date,githash,branch,dirty,note,config,xlen,tech,freq_mhz,maxopt,coremark_ticks,m
 2026-10-26 01:18,ce17e116d,superscalar_wally_decode,no,baseline before late ALU (ce17e116d),rv32gc,32,sky130,10000,0,1816448,2030156,5.5,2300592,638904,38.45,2367725,,,,,,
 2026-10-26 01:22,ce17e116d,superscalar_wally_decode,yes,late ALU in Memory for dependent slot 1 ALU ops,rv32gc,32,sky130,10000,0,1815483,2030156,5.5,2300619,646778,39.11,2366679,,,,,,
 2026-10-26 20:27,ce17e116d,superscalar_wally_decode,yes,late ALU + same-rd + W fwd + late branch,rv32gc,32,sky130,10000,0,1689425,2030156,5.91,2301591,647750,39.17,2240166,,,,,,
+2026-10-26 20:45,e3614bc04,superscalar_lateALU_branch_i1,no,late ALU + same-rd + W fwd + late branch,rv32gc,32,sky130,10000,0,1645556,2030156,6.07,2301769,723509,45.84,2196044,,,,,,
