@@ -52,7 +52,11 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
   input  logic                 PCSrcE,                                   // Execution stage branch is taken
   input  logic [P.XLEN-1:0]    IEUAdrE,                                  // The branch/jump target address
   input  logic [P.XLEN-1:0]    IEUAdrM,                                  // The branch/jump target address
-  output logic [P.XLEN-1:0]    PCE,                                      // Execution stage instruction address
+  input  logic                 Branch2D, Branch2E,                       // Slot 1 is a conditional branch (Branch2D before the issue decision)
+  input  logic                 PCSrc2E,                                  // ... that resolved taken
+  input  logic [P.XLEN-1:0]    IEUAdr2E,                                 // ... to this target
+  input  logic [P.XLEN-1:0]    IEUResult2M,                              // Slot 1's result in Memory: a slot 1 branch's target
+  output logic [P.XLEN-1:0]    PCE,                                     // Execution stage instruction address
   output logic                 BPWrongE,                                 // Prediction is wrong
   output logic                 BPWrongM,                                 // Prediction is wrong
   // Mem
@@ -478,17 +482,34 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
   ////////////////////////////////////////////////////////////////////////////////////////////////
   // Branch and Jump Predictor
   ////////////////////////////////////////////////////////////////////////////////////////////////
+
+  // The bundle's control transfer.  issue.sv admits at most one branch or jump per bundle, in either
+  // slot, so the predictor sees one per bundle whichever slot holds it.  It keeps slot 0's PCs: a
+  // slot 1 branch is predicted and trained at the bundle's address, which is where fetch looks it up,
+  // so the BTB and the direction predictor need no slot field.  Kill2E stays on slot 0's PCSrcE --
+  // a taken slot 1 branch does not kill itself.  In Memory, slot 1's ALU result is its branch target
+  // (a branch's ALU adds PC and immediate), so the target needs no register of its own.
+  logic              BranchBD, BranchBE, PCSrcBE, Branch2M;
+  logic [P.XLEN-1:0] IEUAdrBE, IEUAdrBM;
+  assign BranchBD = BranchD | Branch2D & Issue2D;
+  assign BranchBE = BranchE | Branch2E;
+  assign PCSrcBE  = PCSrcE | PCSrc2E;
+  mux2 #(P.XLEN) ieuadrbemux(IEUAdrE, IEUAdr2E, Branch2E, IEUAdrBE);
+  flopenrc #(1) Branch2MReg(clk, reset, FlushM, ~StallM, Branch2E, Branch2M);
+  mux2 #(P.XLEN) ieuadrbmmux(IEUAdrM, IEUResult2M, Branch2M, IEUAdrBM);
+
   if (P.BPRED_SUPPORTED) begin : bpred
     bpred #(P) bpred(.clk, .reset,
                 .StallF, .StallD, .StallE, .StallM, .StallW,
                 .FlushD, .FlushE, .FlushM, .FlushW, .InstrValidD, .InstrValidE, .Commit2E, .Compressed2E,
-                .BranchD, .BranchE, .JumpD, .JumpE,
-                .InstrD, .PCNextF, .PCNextSeqF, .PC1NextF, .BPPCSrcF, .PCE, .PCM, .PCSrcE, .IEUAdrE, .IEUAdrM, .PCF, .NextValidPCE,
+                .BranchD(BranchBD), .BranchE(BranchBE), .JumpD, .JumpE,
+                .InstrD, .PCNextF, .PCNextSeqF, .PC1NextF, .BPPCSrcF, .PCE, .PCM, .PCSrcE(PCSrcBE),
+                .IEUAdrE(IEUAdrBE), .IEUAdrM(IEUAdrBM), .PCF, .NextValidPCE,
                 .PCD, .PCLinkE, .IClassM, .BPWrongE, .PostSpillInstrRawF, .BPWrongM,
                 .BPDirWrongM, .BTAWrongM, .RASPredPCWrongM, .IClassWrongM, .LateBrM, .LateBrTakenM);
 
   end else begin : bpred
-    mux2 #(P.XLEN) pcmux1(.d0(PCNextSeqF), .d1(IEUAdrE), .s(PCSrcE), .y(PC1NextF));
+    mux2 #(P.XLEN) pcmux1(.d0(PCNextSeqF), .d1(IEUAdrBE), .s(PCSrcBE), .y(PC1NextF));
     // No predictor: the next PC is sequential until a branch resolves taken in Execute, which is the
     // same behaviour as predicting not-taken.  So branches may pair here too, and Kill2E catches the
     // taken case.  BPPCSrcF still needs a driver in this branch because bpred is not instantiated.
@@ -496,14 +517,14 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
     logic BranchM, JumpM, BranchW, JumpW;
     logic CallD, CallE, CallM, CallW;
     logic ReturnD, ReturnE, ReturnM, ReturnW;
-    assign BPWrongE = PCSrcE;
+    assign BPWrongE = PCSrcBE;
     icpred #(P, 0) icpred(.clk, .reset, .StallD, .StallE, .StallM, .StallW, .FlushD, .FlushE, .FlushM,
-      .PostSpillInstrRawF, .InstrD, .BranchD, .BranchE, .JumpD, .JumpE, .BranchM, .BranchW, .JumpM, .JumpW,
+      .PostSpillInstrRawF, .InstrD, .BranchD(BranchBD), .BranchE(BranchBE), .JumpD, .JumpE, .BranchM, .BranchW, .JumpM, .JumpW,
       .CallD, .CallE, .CallM, .CallW, .ReturnD, .ReturnE, .ReturnM, .ReturnW,
       .BTBCallF(1'b0), .BTBReturnF(1'b0), .BTBJumpF(1'b0),
       .BTBBranchF(1'b0), .BPCallF(), .BPReturnF(), .BPJumpF(), .BPBranchF(), .IClassWrongM,
       .BPReturnWrongD(), .BPReturnD());
-    flopenrc #(1) PCSrcMReg(clk, reset, FlushM, ~StallM, PCSrcE, BPWrongM);
+    flopenrc #(1) PCSrcMReg(clk, reset, FlushM, ~StallM, PCSrcBE, BPWrongM);
     assign RASPredPCWrongM = 1'b0;
     assign BPDirWrongM = BPWrongM;
     assign BTAWrongM = BPWrongM;

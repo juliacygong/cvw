@@ -466,8 +466,8 @@ module wallyTracer import cvw::*; #(parameter cvw_t P) (rvviTrace rvvi);
   assign rvvi.intr[0][1]     = 1'b0;
   assign rvvi.mode[0][1]     = PrivilegeModeW;
   assign rvvi.ixl[0][1]      = rvvi.ixl[0][0];
-  // Slot 1 cannot branch, so control always falls through to the instruction after it.
-  assign rvvi.pc_wdata[0][1] = Instr2PCW + 'd4;
+  // Slot 1 may branch, so its next PC is the next instruction still in the pipeline, as for slot 0.
+  assign rvvi.pc_wdata[0][1] = rvvi.pc_wdata[0][0];
 
   for(genvar index = 0; index < NUM_REGS; index += 1) begin
     assign rvvi.x_wdata[0][1][index] = rf[index];

@@ -17,8 +17,9 @@
 //          own ALU can finish in one cycle -- including the Zb*/Zk*/Zicond encodings, since its
 //          controller has its own bitmanip decoder -- plus one load and one multiply or divide,
 //          because the single load/store unit and the single multiply/divide unit can each be
-//          steered to either slot.  It may not hold a CSR access or a control transfer.  Stores are
-//          excluded for a reason that is about replay rather than hardware; see the LOAD arm below.
+//          steered to either slot.  It may hold a conditional branch, which slot 1 resolves with its
+//          own comparator, but no other control transfer and no CSR access.  Stores are excluded for
+//          a reason that is about replay rather than hardware; see the LOAD arm below.
 //
 //          Legality is left to the decoder that already knows it.  Where slot 1 turns out to hold an
 //          instruction this configuration does not implement, or one whose memory access faults, the
@@ -61,6 +62,7 @@ module issue import cvw::*;  #(parameter cvw_t P) (
   localparam [6:0] OP_IMM   = 7'b0010011;
   localparam [6:0] OP_32    = 7'b0111011;   // RV64 only: addw, subw, sllw, srlw, sraw
   localparam [6:0] OP_IMM_32= 7'b0011011;   // RV64 only: addiw, slliw, srliw, sraiw
+  localparam [6:0] BRANCH   = 7'b1100011;
   localparam [6:0] JAL      = 7'b1101111;
   localparam [6:0] JALR     = 7'b1100111;
   localparam [6:0] SYSTEM   = 7'b1110011;
@@ -88,6 +90,7 @@ module issue import cvw::*;  #(parameter cvw_t P) (
   logic       MduOKF;                     // Slot 1's multiply or divide may pair
   logic       Slot0ReadsFPF;              // Slot 0 reads floating-point registers
   logic       Slot0IsMduF, Slot1IsMduF, OneMduOpF;
+  logic       Branch1OKF;                 // A conditional branch in slot 1 may pair
 
   assign Op0F      = Instr0F[6:0];
   assign Op1F      = Instr1F[6:0];
@@ -112,20 +115,26 @@ module issue import cvw::*;  #(parameter cvw_t P) (
 
   // Which instructions may carry a partner in slot 1.  These all still execute normally on their
   // own when they cannot pair.
-  //   ~BPPCSrcF is required unconditionally, and is about the PC mux rather than the opcode: when
+  //   ~BPPCSrcF, unless slot 1 is a branch, and is about the PC mux rather than the opcode: when
   //     BPPCSrcF is high the next PC becomes the predicted target and the sequential PC is discarded,
   //     so a paired slot 1 would issue while the machine jumped somewhere else.  The predictor can
   //     say taken for an instruction that is not a branch at all (a class misprediction on a stale
-  //     or aliased BTB entry), so this cannot be qualified by the opcode.
+  //     or aliased BTB entry), so this cannot be qualified by slot 0's opcode.
   //     With it, a conditional branch predicted not-taken DOES pair; if it later resolves taken,
   //     Kill2E in ifu.sv squashes slot 1 before it commits and the redirect re-fetches it.
+  //     When slot 1 is a branch, slot 0 is not one (Branch1OKF), so the prediction made at the
+  //     bundle's address is slot 1's: the BTB has no slot field, and the predictor trains a slot 1
+  //     branch at slot 0's PC, which is where fetch looks it up.  Both slots issue and fetch goes
+  //     on to the target.  Whatever the BTB said, Execute checks the bundle's next PC against the
+  //     resolved one, so a prediction attributed to the wrong slot costs a misprediction, never
+  //     correctness.
   //   jal/jalr: never pair.  The instruction after an unconditional jump is never the next one
   //     executed, and BPJumpF forces BPPCSrcF high for them anyway.
   //   SYSTEM: mret and sret redirect the PC from the Memory stage without flushing Writeback, so a
   //     slot 1 sharing that stage would commit after the return had already been taken.  This one
   //     cannot be fixed by killing slot 1 later -- it is already past the point of no return.
   //   MISC_MEM: fence.i flushes the pipeline behind it.
-  assign Slot0CanPairF = ~BPPCSrcF & (Op0F != JAL) & (Op0F != JALR) &
+  assign Slot0CanPairF = (~BPPCSrcF | IsBranch1F) & (Op0F != JAL) & (Op0F != JALR) &
                          (Op0F != SYSTEM) & (Op0F != MISC_MEM);
 
   // What slot 1 may hold is a statement about hardware, not about legality.  Slot 1 has its own full
@@ -173,6 +182,18 @@ module issue import cvw::*;  #(parameter cvw_t P) (
                           (Op0F[6:4] == 3'b100) & (Op0F[1:0] == 2'b11));      // fmadd, fmsub, fnmsub, fnmadd
   assign MduOKF = MulF | (DivF & ~IsBranch0F & ~Slot0ReadsFPF);
 
+  // A conditional branch may sit in slot 1 when:
+  //   slot 0 is not also a branch.  The bundle then has one branch, so one BTB entry and one
+  //     direction prediction describe it.  Slot 0 jumps never pair at all.
+  //   slot 0 is not a divide or a floating-point operation, either of which can hold Execute
+  //     (DivBusyE, FDivBusyE).  hazard.sv does not let a misprediction flush Execute while it is held,
+  //     but it still flushes Decode, which drops InstrValidD and with it BPWrongE, so the redirect
+  //     would be lost before the stall ends.  Single-issue Wally never has a branch in Execute
+  //     beside a busy divider; this keeps it that way.  A multiply never holds Execute, so it pairs.
+  //   compressed instructions are supported.  Then a branch target is never misaligned; without
+  //     them it can be, and the fault would belong to slot 1, which has no trap identity.
+  assign Branch1OKF = P.ZCA_SUPPORTED & ~IsBranch0F & ~(Slot0IsMduF & Instr0F[14]) & ~Slot0ReadsFPF;
+
   always_comb
     // A compressed slot 1 cannot go through the opcode whitelist below -- Instr1F[6:0] is not an
     // opcode for a 16-bit instruction.  instrfields vouches for it instead: the formats it decodes
@@ -181,9 +202,10 @@ module issue import cvw::*;  #(parameter cvw_t P) (
     // signal, or it would silently become pairable here.
     // A compressed slot 1 is admitted on instrfields' recognition, minus a store.  Stores stay in
     // slot 0 for the replay reason described in the LOAD arm below -- the same restriction the
-    // 32-bit STORE opcode gets by having no arm at all.
-    if (~&Instr1F[1:0]) Slot1CanPairF = Recognized1F & ~MemRW1F[0] & ~IsBranch1F;
+    // 32-bit STORE opcode gets by having no arm at all.  c.beqz and c.bnez pair as branches do.
+    if (~&Instr1F[1:0]) Slot1CanPairF = Recognized1F & ~MemRW1F[0] & (~IsBranch1F | Branch1OKF);
     else case (Op1F)
+      BRANCH:     Slot1CanPairF = Branch1OKF;
       LUI, AUIPC: Slot1CanPairF = 1'b1;
       OP_IMM:     Slot1CanPairF = 1'b1;
       OP:         Slot1CanPairF = ~MExtF | MduOKF;
